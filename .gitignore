@@ -1,0 +1,9 @@
+__pycache__/
+*.egg-info/
+.venv*/
+build/
+models/
+runs/
+*.cact
+.DS_Store
+.pytest_cache/

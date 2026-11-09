@@ -1,0 +1,26 @@
+[project]
+name = "spindle"
+version = "0.1.0"
+description = "A small tool-calling model for on-device use: inference and fine-tuning."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+dependencies = ["numpy", "jsonschema"]
+
+[project.optional-dependencies]
+train = ["jax", "flax>=0.8", "optax"]
+cuda = ["jax[cuda12]", "flax>=0.8", "optax"]
+dev = ["pytest"]
+
+[project.scripts]
+spindle = "spindle.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["spindle*"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

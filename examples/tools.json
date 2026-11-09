@@ -1,0 +1,61 @@
+[
+  {
+    "name": "get_weather",
+    "description": "Get the current weather for a city.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "city": {
+          "type": "string",
+          "description": "City name"
+        }
+      },
+      "required": [
+        "city"
+      ]
+    }
+  },
+  {
+    "name": "set_timer",
+    "description": "Start a countdown timer.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "minutes": {
+          "type": "integer",
+          "description": "Length in minutes"
+        },
+        "label": {
+          "type": "string",
+          "description": "Optional name for the timer"
+        }
+      },
+      "required": [
+        "minutes"
+      ]
+    }
+  },
+  {
+    "name": "set_light",
+    "description": "Turn a light on or off.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "room": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "on",
+            "off"
+          ]
+        }
+      },
+      "required": [
+        "room",
+        "state"
+      ]
+    }
+  }
+]
