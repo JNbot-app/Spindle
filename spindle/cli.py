@@ -9,7 +9,8 @@ def _run(args):
     with open(args.tools, encoding='utf-8') as handle:
         tools = json.load(handle)
     with Spindle(args.model, tools, system=args.system, library=args.library, threads=args.threads,
-                 min_call_probability=args.min_call_probability) as model:
+                 filters=not args.no_filters, min_call_probability=args.min_call_probability,
+                 window=args.window) as model:
         queries = args.query or []
         if not queries:
             print('Type a request (Ctrl-D to quit).')
@@ -54,6 +55,10 @@ def main(argv=None):
     run.add_argument('--max-new-tokens', type=int, default=256)
     run.add_argument('--min-call-probability', type=float, default=0.0,
                      help='Suppress calls whose mean token probability is below this')
+    run.add_argument('--no-filters', action='store_true',
+                     help='Return every decoded call, also ones the request does not support')
+    run.add_argument('--window', type=int, default=0,
+                     help="Attention window in tokens (0: the model's own); 1024 helps with long tool lists")
     run.add_argument('--threads', type=int, default=4)
     run.add_argument('--library', help='Path to the native engine library (default: build/native)')
     run.add_argument('--metrics', action='store_true', help='Also print token counts and timing')

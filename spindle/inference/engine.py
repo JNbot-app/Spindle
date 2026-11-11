@@ -28,7 +28,7 @@ def find_library(library=None):
 class Engine:
     """One model in memory with one cached request (KV cache). Not thread-safe across requests."""
 
-    def __init__(self, model, *, library=None, threads=4):
+    def __init__(self, model, *, library=None, threads=4, window=0):
         self.model = Path(model).resolve(strict=True)
         self.library = find_library(library)
         if os.name == 'nt':
@@ -48,6 +48,12 @@ class Engine:
         lib.np_free.restype = None
         lib.np_confidence.argtypes = [p, ctypes.POINTER(ctypes.c_float), p, z]
         lib.np_confidence.restype = i
+        lib.np_set_window.argtypes = [p, z, p, z]
+        lib.np_set_window.restype = i
+        lib.np_set_prefix.argtypes = [p, z, p, z]
+        lib.np_set_prefix.restype = i
+        lib.np_prefix_reused.argtypes = [p]
+        lib.np_prefix_reused.restype = z
         self._lock = threading.RLock()
         error = ctypes.create_string_buffer(2048)
         self._handle = lib.np_load(os.fsencode(self.model), 0, 0, threads, error, len(error))
@@ -58,6 +64,8 @@ class Engine:
             self.geometry = struct.unpack('<48If', handle.read(196))
         self.vocab = self.geometry[6] or self.geometry[5]
         self.context = self.geometry[13]
+        if window:
+            self.set_window(window)
 
     def _check(self, status, error):
         if status < 0:
@@ -75,6 +83,24 @@ class Engine:
             self._check(self._lib.np_eval(self._handle, tokens.ctypes.data, tokens.size,
                                           output.ctypes.data, output.size, error, len(error)), error)
             return output
+
+    def set_window(self, window):
+        """Attention window in tokens (0: the model's own). Drops the cached request."""
+        with self._lock:
+            error = ctypes.create_string_buffer(2048)
+            self._check(self._lib.np_set_window(self._handle, window, error, len(error)), error)
+
+    def set_prefix(self, count):
+        """Keep the state after the first `count` prompt tokens (whole prefill chunks only).
+        A later prompt that starts with the same tokens skips their prefill; results do not change."""
+        with self._lock:
+            error = ctypes.create_string_buffer(2048)
+            self._check(self._lib.np_set_prefix(self._handle, count, error, len(error)), error)
+
+    def prefix_reused(self):
+        """Prompt tokens the last prefill took from the prefix cache."""
+        with self._lock:
+            return self._lib.np_prefix_reused(self._handle)
 
     def confidence(self):
         """The archive's confidence head score for the cached tokens, or None without a head."""

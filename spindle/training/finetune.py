@@ -6,7 +6,8 @@ What trains:
     tensors, so they are not limited by 4-bit rounding),
   * the runtime LoRA on the attention projections at `lora_lr` (continued when the parent
     model already has one),
-with an optional span attention loss (see spans.py).
+with an optional span attention loss (see spans.py). Training rows get varied tool lists and
+tool-absent copies first (see tool_lists.py); validation rows stay as they are.
 
 Data parallel over all local devices; gradients are accumulated to `batch_size` rows.
 Only the final model is written.
@@ -26,7 +27,7 @@ from spindle import archive
 from spindle.model import quantize, runtime_lora
 from spindle.model.architecture import SpindleModel, attention_mask
 from spindle.tokenizer import Tokenizer
-from . import data, spans
+from . import data, spans, tool_lists
 from .config import TrainConfig
 
 
@@ -138,6 +139,10 @@ def finetune(parent, train_path, output, *, validation_path=None, config=TrainCo
         held = set(order[:min(config.validation_rows, len(rows) // 10)].tolist())
         validation_rows = [r for i, r in enumerate(rows) if i in held]
         rows = [r for i, r in enumerate(rows) if i not in held]
+    if config.tool_variety or config.absent_tools:
+        def fits(row):
+            return len(data.encode(row, tokenizer)[0]) <= config.max_len
+        rows = tool_lists.augment(rows, config.tool_variety, config.absent_tools, config.seed, fits)
     train_set = data.Dataset(rows, tokenizer, max_len=config.max_len, argument_weight=config.argument_weight,
                              no_call_weight=config.no_call_weight, with_spans=config.span_weight > 0, name='train')
     validation_set = (data.Dataset(validation_rows, tokenizer, max_len=config.max_len, name='validation')

@@ -144,6 +144,15 @@ struct ConfidencePool {
     float score() const;
     size_t bytes() const;
 };
+// State after the first whole prefill chunks of a prompt, kept so the next request with the
+// same leading tokens (usually the tool list) skips their prefill.
+struct PrefixCache {
+    size_t limit = 0, reused = 0;
+    std::vector<int32_t> tokens, token_history;
+    std::vector<KV> cache;
+    std::vector<History> qhist, khist, vhist, ehist;
+    std::unique_ptr<ConfidencePool> confidence;
+};
 struct Decoder {
     std::shared_ptr<Model> model;
     Math math;
@@ -154,8 +163,10 @@ struct Decoder {
     std::vector<int32_t> token_history;
     std::vector<uint32_t> p1, p2;
     std::vector<float> scratch, stream, memory, gathered, angles, last_hidden;
+    PrefixCache prefix;
     size_t used = 0;
-    explicit Decoder(std::shared_ptr<Model>, std::shared_ptr<ProjectionWorkers> = {});
+    // window 0 keeps the archive's KV window (header word 3).
+    explicit Decoder(std::shared_ptr<Model>, std::shared_ptr<ProjectionWorkers> = {}, size_t window = 0);
     void reset();
     float *alloc(size_t);
     void run(const int32_t *, size_t, float *, float * = nullptr, Trace = {});
@@ -163,11 +174,13 @@ struct Decoder {
     void engram(const int32_t *, size_t);
     void attention(size_t, size_t, const float *, float *, Trace);
     void monarch(const Layer &, const float *, float *, size_t count = 1);
+    void save_prefix(const int32_t *, size_t);
+    void restore_prefix();
 };
 } // namespace spindle
 struct np_handle {
     std::shared_ptr<spindle::Model> model;
-    size_t threads = 1;
+    size_t threads = 1, window = 0, prefix = 0;
     std::shared_ptr<spindle::ProjectionWorkers> workers;
     std::unique_ptr<spindle::Math> math;
     std::unique_ptr<spindle::Decoder> decoder;

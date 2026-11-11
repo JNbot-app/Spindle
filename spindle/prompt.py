@@ -18,11 +18,15 @@ def compact(value):
     return value if isinstance(value, str) else json.dumps(value, separators=(',', ':'), ensure_ascii=False)
 
 
-def render_prompt(tools, query, system=''):
+def render_tools(tools, system=''):
+    """The part of the prompt before the request: the same for every request with these tools."""
     system = (system or '').strip()
     head = f'{IM_START}system\n{system}{IM_END}\n' if system else ''
-    return (f'{head}{IM_START}user\n{TOOLS_START}{compact(tools)}{TOOLS_END}\n'
-            f'{query}{IM_END}\n{IM_START}assistant\n')
+    return f'{head}{IM_START}user\n{TOOLS_START}{compact(tools)}{TOOLS_END}\n'
+
+
+def render_prompt(tools, query, system=''):
+    return f'{render_tools(tools, system)}{query}{IM_END}\n{IM_START}assistant\n'
 
 
 def render_target(calls):

@@ -16,6 +16,8 @@ class TrainConfig:
     span_weight: float = 0.5      # 0 turns span attention supervision off
     argument_weight: float = 4.0
     no_call_weight: float = 20.0
+    tool_variety: float = 0.5     # chance that a call row gets a varied tool list (see tool_lists.py)
+    absent_tools: float = 0.02    # tool-absent rows (answer: no call) added, as a share of the training rows
     weight_decay: float = 0.01
     warmup_fraction: float = 0.05
     final_lr_fraction: float = 0.1

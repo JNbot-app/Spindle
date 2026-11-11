@@ -13,7 +13,7 @@
 #endif
 
 namespace spindle {
-Decoder::Decoder(std::shared_ptr<Model> m, std::shared_ptr<ProjectionWorkers> team)
+Decoder::Decoder(std::shared_ptr<Model> m, std::shared_ptr<ProjectionWorkers> team, size_t window)
     : model(std::move(m)), math(std::move(team)) {
     model->validate_decoder();
     auto &h = model->h;
@@ -23,7 +23,9 @@ Decoder::Decoder(std::shared_ptr<Model> m, std::shared_ptr<ProjectionWorkers> te
     nkh = h[9];
     qd = h[11];
     vd = h[12];
-    win = h[3];
+    win = window ? window : h[3];
+    if (win > h[13])
+        throw std::invalid_argument("KV window exceeds the model context");
     hn = h[14];
     sites = h[31];
     if (model->confidence_head)
@@ -86,6 +88,26 @@ void Decoder::reset() {
     for (auto &h : ehist)
         h.reset();
     // KV bytes need not be cleared: position masks all unwritten slots.
+}
+void Decoder::save_prefix(const int32_t *tokens, size_t count) {
+    prefix.tokens.assign(tokens, tokens + count);
+    prefix.token_history = token_history;
+    prefix.cache = cache;
+    prefix.qhist = qhist;
+    prefix.khist = khist;
+    prefix.vhist = vhist;
+    prefix.ehist = ehist;
+    prefix.confidence = confidence ? std::make_unique<ConfidencePool>(*confidence) : nullptr;
+}
+void Decoder::restore_prefix() {
+    token_history = prefix.token_history;
+    cache = prefix.cache;
+    qhist = prefix.qhist;
+    khist = prefix.khist;
+    vhist = prefix.vhist;
+    ehist = prefix.ehist;
+    if (confidence) *confidence = *prefix.confidence;
+    position = prefix.reused = prefix.tokens.size();
 }
 float *Decoder::alloc(size_t count) {
     if (count > scratch.size() - used)
@@ -774,9 +796,25 @@ void Decoder::run(const int32_t *tokens, size_t count, float *logits, float *hid
     ProfileScopeMode mode(count > 1);
     ProfileTimer timer_run(PHASE_EVAL_RUN);
     Profiler::record_tokens(count, count > 1);
-    for (size_t start = 0; start < count; start += block_capacity) {
+    // Prefix reuse covers whole chunks only and leaves at least one token, so the remaining
+    // chunks and the logits are computed exactly as in a full prefill.
+    size_t start = 0, record = 0;
+    if (position == 0 && !trace.callback) {
+        prefix.reused = 0;
+        const size_t length = std::min(prefix.limit, count - 1) / block_capacity * block_capacity;
+        if (length && prefix.tokens.size() == length &&
+            std::equal(prefix.tokens.begin(), prefix.tokens.end(), tokens)) {
+            restore_prefix();
+            start = length;
+        } else {
+            record = length;
+        }
+    }
+    for (; start < count; start += block_capacity) {
         size_t t = std::min(block_capacity, count - start);
         chunk(tokens + start, t, start + t == count ? hidden : nullptr, trace);
+        if (record && position == record)
+            save_prefix(tokens, record);
     }
     used = 0;
     float *x = alloc(d);

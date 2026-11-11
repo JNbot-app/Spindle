@@ -8,9 +8,10 @@ import time
 
 import numpy as np
 
-from spindle.prompt import render_prompt
+from spindle.prompt import render_prompt, render_tools
 from spindle.tokenizer import Tokenizer
 from .engine import Engine
+from .filters import filter_calls
 from .grammar import IncrementalSampler, expand_refs
 
 
@@ -140,12 +141,20 @@ class Spindle:
     {"type": "function", "function": {...}} form). The model never runs a tool itself.
 
     Every call gets a probability: the mean grammar-constrained token probability of that call.
-    Calls below `min_call_probability` move to `suppressed_calls` (0 keeps every call).
+    With `filters` on (the default), calls the request does not support move to
+    `suppressed_calls`, with the reason in `suppressed_reasons` (see filters.py). Calls below
+    `min_call_probability` are suppressed too (0 keeps every call).
+
+    `window` sets the attention window in tokens (0: the model's own, 512). A larger window helps
+    when long tool lists push the needed tool out of view, at some extra latency. The tool part of
+    the prompt is cached, so requests with the same tools skip most of its prefill.
     """
 
-    def __init__(self, model, tools=None, *, system='', library=None, threads=4, min_call_probability=0.0):
-        self.engine = Engine(model, library=library, threads=threads)
+    def __init__(self, model, tools=None, *, system='', library=None, threads=4, filters=True,
+                 min_call_probability=0.0, window=0):
+        self.engine = Engine(model, library=library, threads=threads, window=window)
         self.tokenizer = Tokenizer.from_archive(model)
+        self.filters = filters
         self.min_call_probability = min_call_probability
         self._lock = threading.RLock()
         self.set_tools(tools or [], system=system)
@@ -165,8 +174,10 @@ class Spindle:
             normalized.append({'name': name, 'description': entry.get('description', ''), 'parameters': parameters})
             aliases[name] = (entry['name'], property_aliases)
         IncrementalSampler(normalized, self.tokenizer)  # validate the schemas now, not mid-request
+        prefix = 1 + len(self.tokenizer.encode(render_tools(normalized, system)))
         with self._lock:
             self.tools, self.aliases, self.system = normalized, aliases, system.strip()
+            self.engine.set_prefix(prefix)
 
     def __call__(self, query, max_new_tokens=256):
         if not isinstance(query, str):
@@ -198,16 +209,27 @@ class Spindle:
             calls = sampler.json.value if complete else []
             probabilities = [math.exp(sum(v) / len(v)) for v in
                              (log_probs.get(i, [0.0]) for i in range(len(calls)))]
-            kept, suppressed = [], []
-            for call, probability in zip(calls, probabilities):
-                original, property_aliases = self.aliases[call['name']]
-                call = {'name': original, 'arguments': restore(call['arguments'], property_aliases)}
-                (kept if probability >= self.min_call_probability else suppressed).append(call)
-            return {'function_calls': kept, 'suppressed_calls': suppressed,
+            if self.filters:
+                kept, suppressed, reasons = filter_calls(
+                    calls, self.tools, query, system=self.system, call_probabilities=probabilities,
+                    min_call_probability=self.min_call_probability)
+            else:
+                kept, suppressed, reasons = calls, [], []
+            return {'function_calls': self._restore(kept), 'suppressed_calls': self._restore(suppressed),
+                    'suppressed_reasons': reasons,
                     'call_probabilities': probabilities, 'confidence': self.engine.confidence(),
                     'complete': complete,
-                    'metrics': {'prompt_tokens': len(ids), 'generated_tokens': len(generated),
+                    'metrics': {'prompt_tokens': len(ids), 'cached_prompt_tokens': self.engine.prefix_reused(),
+                                'generated_tokens': len(generated),
                                 'prefill_seconds': prefill, 'total_seconds': time.perf_counter() - started}}
+
+    def _restore(self, calls):
+        """Give calls back the caller's original tool and argument names."""
+        result = []
+        for call in calls:
+            original, property_aliases = self.aliases[call['name']]
+            result.append({'name': original, 'arguments': restore(call['arguments'], property_aliases)})
+        return result
 
     def close(self):
         self.engine.close()

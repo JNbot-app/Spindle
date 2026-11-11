@@ -39,6 +39,13 @@ NP_API int32_t np_forward_trace(np_handle *, const int32_t *, size_t, float *, s
 // Cached prefill or continuation. np_decode requires exactly one token.
 NP_API int32_t np_eval(np_handle *, const int32_t *, size_t, float *, size_t, char *, size_t);
 NP_API int32_t np_decode(np_handle *, int32_t, float *, size_t, char *, size_t);
+// KV window in tokens (0: the archive's own). Changing it drops the cached request state.
+NP_API int32_t np_set_window(np_handle *, size_t, char *, size_t);
+// Keep the state after the first `count` prompt tokens (rounded down to whole prefill chunks).
+// A later prompt starting with the same tokens skips their prefill; results are unchanged.
+NP_API int32_t np_set_prefix(np_handle *, size_t, char *, size_t);
+// Prompt tokens restored from the prefix cache by the last prefill.
+NP_API size_t np_prefix_reused(np_handle *);
 NP_API int32_t np_engram(np_handle *, const int32_t *, size_t, float *, size_t, char *, size_t);
 NP_API int32_t np_replay_norm(np_handle *, int32_t, const float *, size_t, float *, size_t, char *,
                               size_t);

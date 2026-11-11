@@ -37,6 +37,10 @@ Or from the command line:
 spindle run model.cact "What's the weather in Lagos?" --tools examples/tools.json
 ```
 
+The tool part of the prompt is cached, so repeat requests with the same tools start faster. With long
+tool lists (prompts over 512 tokens), raise the attention window: `Spindle(..., window=1024)` or
+`--window 1024`.
+
 ## Fine-tune
 
 Training data is JSONL, one example per line (see `examples/train.jsonl`):
@@ -50,6 +54,10 @@ spindle finetune --model model.cact --train train.jsonl --output runs/my-run
 ```
 
 The result is `runs/my-run/model.cact`. Run `spindle finetune -h` for every setting.
+
+Before training, some rows get a varied tool list, and copies of single-call rows without their
+needed tool are added with "no call" as the answer. This teaches the model to check the tool list.
+Tune it with `--tool-variety` and `--absent-tools` (0 turns each off).
 
 ## Layout
 
