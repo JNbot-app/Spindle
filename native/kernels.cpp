@@ -59,6 +59,8 @@ const CpuKernels &cpu_kernels(){
             if(has_dotprod())return &neon_dot_kernels();
 #endif
             return &neon_kernels();
+#elif defined(__wasm_simd128__)
+            return &wasm_kernels();
 #elif defined(SPINDLE_HAVE_X86)
             return has_avx2()?&avx2_kernels():&sse2_kernels();
 #else

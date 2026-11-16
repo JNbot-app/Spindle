@@ -86,47 +86,60 @@ def encode(row, tokenizer, argument_weight=1.0, no_call_weight=1.0):
     return np.asarray(ids, np.int32), weights
 
 
+BUCKET = 128  # rows are padded to a multiple of this, so only a few array shapes exist
+
+
 class Dataset:
-    """All rows tokenized and padded to one length, so every batch has the same shape."""
+    """Tokenized rows. Batches are padded to the length of their longest row, rounded up to a
+    multiple of BUCKET, so short rows do not pay for long ones."""
 
     def __init__(self, rows, tokenizer, *, max_len=512, argument_weight=1.0, no_call_weight=1.0,
                  with_spans=False, name='data'):
-        encoded, skipped = [], 0
+        self.pad_id, self.max_len = tokenizer.pad_id, max_len
+        self.rows, skipped = [], 0
         for i, row in enumerate(rows):
             ids, weights = encode(row, tokenizer, argument_weight, no_call_weight)
             if len(ids) > max_len:
                 skipped += 1
-                continue
-            targets = spans.span_targets(row, tokenizer) if with_spans and row['answers'] else []
-            encoded.append((ids, weights, spans.as_arrays(targets)))
+            else:
+                targets = spans.span_targets(row, tokenizer) if with_spans and row['answers'] else []
+                self.rows.append((ids, weights, spans.as_arrays(targets)))
             if (i + 1) % 2000 == 0 or i + 1 == len(rows):
                 print(f'  {name}: tokenized {i + 1:,}/{len(rows):,} rows', flush=True)
-        if not encoded:
+        if not self.rows:
             raise ValueError(f'{name}: no rows fit in {max_len} tokens')
+        self.lengths = np.asarray([len(ids) for ids, _, _ in self.rows])
         if skipped:
             print(f'  {name}: skipped {skipped:,} rows longer than {max_len} tokens', flush=True)
-        length = min(max_len, -(-max(len(ids) for ids, _, _ in encoded) // 64) * 64)
-        self.tokens = np.full((len(encoded), length), tokenizer.pad_id, np.int32)
-        self.weights = np.zeros((len(encoded), length), np.float32)
-        self.spans = np.stack([s for _, _, s in encoded])
-        for i, (ids, weights, _) in enumerate(encoded):
-            self.tokens[i, :len(ids)], self.weights[i, :len(ids)] = ids, weights
         if with_spans:
-            count = int((self.spans[:, 0] > 0).sum())
-            print(f'  {name}: {count:,} span attention targets in {int((self.spans[:, 0, 0] > 0).sum()):,} rows',
-                  flush=True)
-        print(f'  {name}: {len(self):,} rows, padded to {length} tokens', flush=True)
+            targets = sum(int((s[0] > 0).sum()) for _, _, s in self.rows)
+            print(f'  {name}: {targets:,} span attention targets', flush=True)
+        print(f'  {name}: {len(self):,} rows, mean {self.lengths.mean():.0f} tokens, '
+              f'{(self.lengths > 256).mean():.0%} over 256', flush=True)
 
     def __len__(self):
-        return len(self.tokens)
+        return len(self.rows)
 
-    def batch(self, indices, size):
-        """Rows `indices`, padded to `size` rows with zero-weight copies of the first row."""
-        indices = np.asarray(indices)
-        fill = np.concatenate([indices, np.repeat(indices[:1], size - len(indices))])
-        weights = self.weights[fill].copy()
-        span = self.spans[fill].copy()
-        weights[len(indices):] = 0
-        span[len(indices):] = 0
-        return {'tokens': self.tokens[fill], 'weights': weights,
+    def padded_length(self, indices):
+        longest = int(self.lengths[np.asarray(indices)].max())
+        return min(self.max_len, -(-longest // BUCKET) * BUCKET)
+
+    def batch(self, indices, size, length=None):
+        """Rows `indices` as arrays of `size` rows (the rest are zero-weight copies of the first row)."""
+        indices = list(indices)
+        length = length or self.padded_length(indices)
+        tokens = np.full((size, length), self.pad_id, np.int32)
+        weights = np.zeros((size, length), np.float32)
+        span = np.zeros((size, 3, spans.PER_ROW), np.int32)
+        for k, index in enumerate(indices + indices[:1] * (size - len(indices))):
+            ids, row_weights, row_spans = self.rows[index]
+            tokens[k, :len(ids)] = ids
+            if k < len(indices):
+                weights[k, :len(ids)], span[k] = row_weights, row_spans
+        return {'tokens': tokens, 'weights': weights,
                 'span_query': span[:, 0], 'span_start': span[:, 1], 'span_end': span[:, 2]}
+
+    def groups(self, indices, size):
+        """Split the rows of one update into groups of `size` rows of similar length."""
+        ordered = sorted(indices, key=lambda i: self.lengths[i])
+        return [ordered[start:start + size] for start in range(0, len(ordered), size)]

@@ -37,6 +37,7 @@ struct Tensor {
     size_t elements = 0, bytes = 0, packed_bytes = 0;
     const uint8_t *data = nullptr;
     std::vector<float> values; // FP16 parameters or group norms, never dense CQ weights.
+    std::vector<uint8_t> nibbles; // CQ codes narrower than 4 bits, widened to nibbles at load.
     std::array<float, 16> book{};
     float scalar(size_t) const;
     const float *floats() const {
@@ -85,7 +86,7 @@ struct Math {
 void cq4_project(const Tensor &, const float *, size_t, float *, size_t, size_t,
                  std::vector<float> &, std::vector<float> &, ProjectionWorkers *, bool exact);
 void cq4_prepare_input(const float *x, size_t cols, size_t padded, size_t batch,
-                       float *inputs, float *scratch_rotated);
+                       float *inputs, ProjectionWorkers *workers);
 void cq4_project_prepared(const Tensor &t, const float *inputs, size_t batch, float *out,
                           size_t begin, size_t rows, std::vector<float> &tile,
                           ProjectionWorkers *workers, bool exact);
@@ -102,7 +103,7 @@ void lora_add(const Tensor &, const Tensor &, size_t layer, const float *x, size
 void kron(const float *, const Tensor &, const Tensor &, float *, float *);
 void group_mix(const float *, const Tensor &, const Tensor &, float *, float *);
 void attention_prefill(const float *, const float *, const float *, float *, float *,
-                       size_t, size_t, size_t, size_t, size_t, size_t, size_t);
+                       size_t, size_t, size_t, size_t, size_t, size_t, size_t, ProjectionWorkers *);
 float sigmoid(float);
 void sigmoid_multiply(float *, const float *, size_t, float *);
 void finite(const float *, size_t);
@@ -165,7 +166,7 @@ struct Decoder {
     std::vector<float> scratch, stream, memory, gathered, angles, last_hidden;
     PrefixCache prefix;
     size_t used = 0;
-    // window 0 keeps the archive's KV window (header word 3).
+    // window 0: the wider of the archive's KV window and its local attention width.
     explicit Decoder(std::shared_ptr<Model>, std::shared_ptr<ProjectionWorkers> = {}, size_t window = 0);
     void reset();
     float *alloc(size_t);

@@ -1,0 +1,37 @@
+name: Deploy demo
+# Publishes demo/ to GitHub Pages. In the repository settings, set Pages > Source to "GitHub Actions".
+on:
+  push:
+    branches: [main]
+    paths: ['demo/**', '.github/workflows/demo.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - name: Check that the model is in place
+        run: test -f demo/model.cact || (echo "demo/model.cact is missing" && exit 1)
+      - name: Leave out files the site does not need
+        run: rm -f demo/node-test.mjs demo/node-examples.mjs demo/package.json
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: demo
+      - id: deployment
+        uses: actions/deploy-pages@v4

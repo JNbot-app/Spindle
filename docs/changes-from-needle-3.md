@@ -161,16 +161,17 @@ It then picked a visible tool near the end of the list, or no tool. In those cas
 right.
 
 Raising the window to 1024, with no retraining, gave the largest single gain we found. 512 gave the same gain
-at lower latency, and training with the same window added a little more. Spindle uses 512. The KV cache is 8-bit, so the extra memory
+at lower latency, and training with the same window added a little more. The KV cache is 8-bit, so the extra memory
 is small.
 
 With five or six tools, prompts pass 512 tokens again and the needed tool falls out of view. In our tests,
 on prompts longer than 512 tokens with three extra tools, 512 kept 17 of 74 right answers and 1024 kept 53,
-with no retraining. So the window can be set at run time: `Spindle(..., window=1024)` or `--window 1024`.
+with no retraining. So Spindle runs with a window of 1024 by default (the local attention width the model
+was built with), and the window can be set at run time: `Spindle(..., window=512)` or `--window 512`.
 
 ## 6. Calls only, and a per-call probability
 
-**Calls only.** Needle 3 writes a short reasoning text before its calls. Spindle trains and decodes calls only.
+**Reasoning is optional.** Needle 3 writes a short reasoning note before its calls. Spindle lets a model do that when it prefers to (`reasoning=True`) and can train with notes built from the answers (`spindle build-data --reasoning`); rows without a note train calls only.
 Reasoning costs extra tokens on a CPU, and in our tests forcing it lowered call accuracy.
 
 **Per-call probability.** Needle 3 reports a confidence from a learned head, and a local fine-tune leaves that
@@ -200,6 +201,15 @@ model. Spindle has its own small engine (C++17, about 3,300 lines, in `native/`)
   same tools. The engine keeps its state after the tool part (whole 128-token prefill chunks) and reuses it
   when the next prompt starts with the same tokens. The output is bit-for-bit the same; only the prefill of
   the tool list is skipped. `metrics['cached_prompt_tokens']` shows how much was reused.
+
+- **Reads Needle 3 files too.** Weights stored with fewer than 4 bits (the shipped Needle 3 model uses
+  2) are widened to the 4-bit layout when the file is loaded, so they use the same kernels.
+- **The prompt the model was trained on.** Tools are shown as written (only names become snake_case), and
+  a timestamp in the system prompt becomes the short date fact used in training (`date: 2024-06-06 Thu 09:58`).
+- **Exact copies.** A text argument that differs from a passage of the request only in punctuation or case
+  takes the request's spelling (`03 1234-5678` becomes `(03) 1234-5678`).
+- **Small worker team.** Prefill runs its per-token loops on a few threads (half the performance cores, at
+  most four); results do not depend on the thread count.
 
 Monarch costs about 15% more decode time per token than shared matrices. Its arithmetic is the same, but the
 memory access is less regular.

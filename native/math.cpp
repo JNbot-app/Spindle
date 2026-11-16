@@ -12,6 +12,9 @@
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
 #include <arm_neon.h>
 #endif
+#if defined(__wasm_simd128__)
+#include <wasm_simd128.h>
+#endif
 
 namespace spindle {
 Math::Math(std::shared_ptr<ProjectionWorkers> team)
@@ -407,7 +410,8 @@ void group_mix(const float *x, const Tensor &a, const Tensor &b, float *out, flo
 }
 void attention_prefill(const float *queries, const float *keys, const float *values,
                        float *scores, float *out, size_t count, size_t previous,
-                       size_t window, size_t heads, size_t kv_heads, size_t qdim, size_t vdim) {
+                       size_t window, size_t heads, size_t kv_heads, size_t qdim, size_t vdim,
+                       ProjectionWorkers *workers) {
     const size_t entries = previous + count;
     const float scale = 1.f / std::sqrt(float(qdim));
     for (size_t h = 0; h < heads; ++h) {
@@ -421,14 +425,14 @@ void attention_prefill(const float *queries, const float *keys, const float *val
         }
         {
             ProfileTimer timer(PHASE_ATTN_SOFTMAX);
-            for (size_t t = 0; t < count; ++t) {
+            parallel_for(workers, count, 8, [&](size_t t) {
                 const size_t end = previous + t + 1;
                 const size_t begin = end > window ? end - window : 0;
                 float *row = scores + t * entries;
                 softmax(row + begin, end - begin);
                 std::fill(row, row + begin, 0.f);
                 std::fill(row + end, row + entries, 0.f);
-            }
+            });
         }
         {
             ProfileTimer timer(PHASE_ATTN_VALUES);
@@ -498,9 +502,7 @@ void Math::project(const Tensor &t, const float *x, size_t batch, float *out, si
     }
 }
 void Math::prepare_input(const float *x, size_t cols, size_t padded, size_t batch, float *prepared_inputs) {
-    rotated_input.resize(std::max(size_t(8192), (batch + 1) * padded));
-    float *rotated = rotated_input.data();
-    cq4_prepare_input(x, cols, padded, batch, prepared_inputs, rotated);
+    cq4_prepare_input(x, cols, padded, batch, prepared_inputs, workers.get());
 }
 void Math::project_prepared(const Tensor &t, const float *inputs, size_t batch, float *out, size_t begin,
                             size_t rows) {
@@ -616,6 +618,16 @@ static float a8_codes(const float *x, size_t n, int8_t *codes) {
         codes[i] = int8_t(std::max(-128.f, std::min(127.f, std::nearbyint(x[i] * inverse))));
     return scale;
 }
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+static inline int32x4_t dot_i8(int32x4_t acc, int8x16_t a, int8x16_t b) {
+#if defined(__ARM_FEATURE_DOTPROD)
+    return vdotq_s32(acc, a, b);
+#else
+    acc = vpadalq_s16(acc, vmull_s8(vget_low_s8(a), vget_low_s8(b)));
+    return vpadalq_s16(acc, vmull_high_s8(a, b));
+#endif
+}
+#endif
 void KV::attend(size_t head, const float *queries, size_t group, size_t first, size_t count,
                 float *scores, float *out, float scale) const {
     // All query heads that share this KV head read each cached row once.
@@ -626,27 +638,70 @@ void KV::attend(size_t head, const float *queries, size_t group, size_t first, s
     float qscale[max_group];
     for (size_t g = 0; g < group; ++g)
         qscale[g] = a8_codes(queries + g * qdim, qdim, q + g * qdim) * scale;
+    // The ring holds the entries as at most two runs of consecutive slots.
+    const size_t start = first % window, head_run = std::min(count, window - start);
+    const size_t key_stride = heads * qdim, value_stride = heads * vdim;
+    auto slot_of = [&](size_t j) { return j < head_run ? start + j : j - head_run; };
     {
         ProfileTimer timer(PHASE_ATTN_SCORES);
-        for (size_t j = 0; j < count; ++j) {
-            const size_t row = ((first + j) % window) * heads + head;
-            const int8_t *key = k.data() + row * qdim;
-            for (size_t g = 0; g < group; ++g) {
-                const int8_t *qg = q + g * qdim;
-                int32_t dot = 0;
-                size_t i = 0;
+        for (size_t j = 0; j < count;) {
+            const size_t slot = slot_of(j), run = j < head_run ? head_run - j : count - j;
+            const int8_t *key = k.data() + (slot * heads + head) * qdim;
+            const float *key_scale = ks.data() + slot * heads + head;
+            size_t r = 0;
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
-                int32x4_t acc = vdupq_n_s32(0);
-                for (; i + 16 <= qdim; i += 16) {
-                    const int8x16_t a = vld1q_s8(key + i), b = vld1q_s8(qg + i);
-                    acc = vpadalq_s16(acc, vmull_s8(vget_low_s8(a), vget_low_s8(b)));
-                    acc = vpadalq_s16(acc, vmull_high_s8(a, b));
+            // Four rows per step: integer sums are exact in any order, and each score keeps
+            // the scalar formula float(dot) * (qscale * ks).
+            for (; r + 4 <= run; r += 4) {
+                const int8_t *rows[4] = {key + r * key_stride, key + (r + 1) * key_stride,
+                                         key + (r + 2) * key_stride, key + (r + 3) * key_stride};
+                const float scales[4] = {key_scale[r * heads], key_scale[(r + 1) * heads],
+                                         key_scale[(r + 2) * heads], key_scale[(r + 3) * heads]};
+                const float32x4_t row_scale = vld1q_f32(scales);
+                for (size_t g = 0; g < group; ++g) {
+                    const int8_t *qg = q + g * qdim;
+                    int32x4_t a0 = vdupq_n_s32(0), a1 = a0, a2 = a0, a3 = a0;
+                    size_t i = 0;
+                    for (; i + 16 <= qdim; i += 16) {
+                        const int8x16_t b = vld1q_s8(qg + i);
+                        a0 = dot_i8(a0, vld1q_s8(rows[0] + i), b);
+                        a1 = dot_i8(a1, vld1q_s8(rows[1] + i), b);
+                        a2 = dot_i8(a2, vld1q_s8(rows[2] + i), b);
+                        a3 = dot_i8(a3, vld1q_s8(rows[3] + i), b);
+                    }
+                    int32x4_t dots = vpaddq_s32(vpaddq_s32(a0, a1), vpaddq_s32(a2, a3));
+                    if (i < qdim) {
+                        int32_t tail[4] = {};
+                        for (size_t row = 0; row < 4; ++row)
+                            for (size_t c = i; c < qdim; ++c) tail[row] += int32_t(rows[row][c]) * qg[c];
+                        dots = vaddq_s32(dots, vld1q_s32(tail));
+                    }
+                    vst1q_f32(scores + g * count + j + r,
+                              vmulq_f32(vcvtq_f32_s32(dots), vmulq_n_f32(row_scale, qscale[g])));
                 }
-                dot = vaddvq_s32(acc);
-#endif
-                for (; i < qdim; ++i) dot += int32_t(key[i]) * qg[i];
-                scores[g * count + j] = float(dot) * (qscale[g] * ks[row]);
             }
+#endif
+            for (; r < run; ++r) {
+                const int8_t *row = key + r * key_stride;
+                for (size_t g = 0; g < group; ++g) {
+                    const int8_t *qg = q + g * qdim;
+                    int32_t dot = 0;
+                    size_t i = 0;
+#if defined(__wasm_simd128__)
+                    v128_t acc = wasm_i32x4_splat(0);
+                    for (; i + 16 <= qdim; i += 16) {
+                        const v128_t a = wasm_v128_load(row + i), b = wasm_v128_load(qg + i);
+                        acc = wasm_i32x4_add(acc, wasm_i32x4_extadd_pairwise_i16x8(wasm_i16x8_extmul_low_i8x16(a, b)));
+                        acc = wasm_i32x4_add(acc, wasm_i32x4_extadd_pairwise_i16x8(wasm_i16x8_extmul_high_i8x16(a, b)));
+                    }
+                    dot = wasm_i32x4_extract_lane(acc, 0) + wasm_i32x4_extract_lane(acc, 1) +
+                          wasm_i32x4_extract_lane(acc, 2) + wasm_i32x4_extract_lane(acc, 3);
+#endif
+                    for (; i < qdim; ++i) dot += int32_t(row[i]) * qg[i];
+                    scores[g * count + j + r] = float(dot) * (qscale[g] * key_scale[r * heads]);
+                }
+            }
+            j += run;
         }
     }
     {
@@ -654,7 +709,7 @@ void KV::attend(size_t head, const float *queries, size_t group, size_t first, s
         for (size_t g = 0; g < group; ++g) {
             float *p = scores + g * count;
             softmax(p, count);
-            for (size_t j = 0; j < count; ++j) p[j] *= vs[((first + j) % window) * heads + head];
+            for (size_t j = 0; j < count; ++j) p[j] *= vs[slot_of(j) * heads + head];
         }
     }
     ProfileTimer timer(PHASE_ATTN_VALUES);
@@ -667,26 +722,51 @@ void KV::attend(size_t head, const float *queries, size_t group, size_t first, s
             float32x4_t acc[6][4];
             for (size_t g = 0; g < 6; ++g)
                 for (size_t c = 0; c < 4; ++c) acc[g][c] = vdupq_n_f32(0.f);
-            for (size_t j = 0; j < count; ++j) {
-                const size_t row = ((first + j) % window) * heads + head;
-                const int8x16_t codes = vld1q_s8(v.data() + row * vdim + i);
-                const int16x8_t low = vmovl_s8(vget_low_s8(codes)), high = vmovl_high_s8(codes);
-                const float32x4_t value[4] = {vcvtq_f32_s32(vmovl_s16(vget_low_s16(low))),
-                                              vcvtq_f32_s32(vmovl_high_s16(low)),
-                                              vcvtq_f32_s32(vmovl_s16(vget_low_s16(high))),
-                                              vcvtq_f32_s32(vmovl_high_s16(high))};
-                for (size_t g = 0; g < group; ++g) {
-                    const float factor = scores[g * count + j];
-                    for (size_t c = 0; c < 4; ++c) acc[g][c] = vfmaq_n_f32(acc[g][c], value[c], factor);
+            for (size_t j = 0; j < count;) {
+                const size_t run = j < head_run ? head_run - j : count - j;
+                const int8_t *value = v.data() + (slot_of(j) * heads + head) * vdim + i;
+                for (size_t r = 0; r < run; ++r, value += value_stride) {
+                    const int8x16_t codes = vld1q_s8(value);
+                    const int16x8_t low = vmovl_s8(vget_low_s8(codes)), high = vmovl_high_s8(codes);
+                    const float32x4_t column[4] = {vcvtq_f32_s32(vmovl_s16(vget_low_s16(low))),
+                                                   vcvtq_f32_s32(vmovl_high_s16(low)),
+                                                   vcvtq_f32_s32(vmovl_s16(vget_low_s16(high))),
+                                                   vcvtq_f32_s32(vmovl_high_s16(high))};
+                    for (size_t g = 0; g < group; ++g) {
+                        const float factor = scores[g * count + j + r];
+                        for (size_t c = 0; c < 4; ++c) acc[g][c] = vfmaq_n_f32(acc[g][c], column[c], factor);
+                    }
                 }
+                j += run;
             }
             for (size_t g = 0; g < group; ++g)
                 for (size_t c = 0; c < 4; ++c) vst1q_f32(out + g * vdim + i + c * 4, acc[g][c]);
         }
+#elif defined(__wasm_simd128__)
+    // Same as NEON, but multiply then add: the per-column order of the plain loop below.
+    if (group <= 6)
+        for (; i + 16 <= vdim; i += 16) {
+            v128_t acc[6][4];
+            for (size_t g = 0; g < 6; ++g)
+                for (size_t c = 0; c < 4; ++c) acc[g][c] = wasm_f32x4_splat(0.f);
+            for (size_t j = 0; j < count; ++j) {
+                const v128_t codes = wasm_v128_load(v.data() + (slot_of(j) * heads + head) * vdim + i);
+                const v128_t low = wasm_i16x8_extend_low_i8x16(codes), high = wasm_i16x8_extend_high_i8x16(codes);
+                const v128_t column[4] = {wasm_f32x4_convert_i32x4(wasm_i32x4_extend_low_i16x8(low)),
+                                          wasm_f32x4_convert_i32x4(wasm_i32x4_extend_high_i16x8(low)),
+                                          wasm_f32x4_convert_i32x4(wasm_i32x4_extend_low_i16x8(high)),
+                                          wasm_f32x4_convert_i32x4(wasm_i32x4_extend_high_i16x8(high))};
+                for (size_t g = 0; g < group; ++g) {
+                    const v128_t factor = wasm_f32x4_splat(scores[g * count + j]);
+                    for (size_t c = 0; c < 4; ++c) acc[g][c] = wasm_f32x4_add(acc[g][c], wasm_f32x4_mul(factor, column[c]));
+                }
+            }
+            for (size_t g = 0; g < group; ++g)
+                for (size_t c = 0; c < 4; ++c) wasm_v128_store(out + g * vdim + i + c * 4, acc[g][c]);
+        }
 #endif
     for (size_t j = 0; j < count && i < vdim; ++j) {
-        const size_t row = ((first + j) % window) * heads + head;
-        const int8_t *value = v.data() + row * vdim;
+        const int8_t *value = v.data() + (slot_of(j) * heads + head) * vdim;
         for (size_t g = 0; g < group; ++g) {
             const float factor = scores[g * count + j];
             for (size_t c = i; c < vdim; ++c) out[g * vdim + c] += factor * float(value[c]);

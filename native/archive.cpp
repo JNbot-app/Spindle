@@ -96,31 +96,18 @@ void Tensor::row(size_t r, float *out, bool rotated) const {
             out[i] = scalar(r * cols + i);
         return;
     }
-    const size_t width = bits == 5 ? 2 : bits;
-    const uint8_t *codes = data + r * padded * width / 8;
+    const uint8_t *codes = data + r * padded / 2;
     std::array<float, 128> group_values;
     for (size_t g = 0; g < padded / group; ++g) {
         const float scale = values[r * (padded / group) + g];
-        if (bits == 4) {
-            std::array<float, 16> lookup;
-            for (size_t i = 0; i < 16; ++i)
-                lookup[i] = book[i] * scale;
-            const uint8_t *p = codes + g * 64;
-            for (size_t i = 0; i < 64; ++i) {
-                group_values[2 * i] = lookup[p[i] & 15];
-                group_values[2 * i + 1] = lookup[p[i] >> 4];
-            }
-        } else
-            for (size_t i = 0; i < group; ++i) {
-                size_t bit = (g * group + i) * width;
-                unsigned index = codes[bit / 8] >> (bit % 8);
-                if (bit % 8 + width > 8)
-                    index |= unsigned(codes[bit / 8 + 1]) << (8 - bit % 8);
-                index &= (1u << width) - 1;
-                if (bits == 5 && index == 2)
-                    throw std::invalid_argument("Invalid ternary code");
-                group_values[i] = book[index] * scale;
-            }
+        std::array<float, 16> lookup;
+        for (size_t i = 0; i < 16; ++i)
+            lookup[i] = book[i] * scale;
+        const uint8_t *p = codes + g * 64;
+        for (size_t i = 0; i < 64; ++i) {
+            group_values[2 * i] = lookup[p[i] & 15];
+            group_values[2 * i + 1] = lookup[p[i] >> 4];
+        }
         if (!rotated)
             fwht(group_values.data(), group);
         size_t count = rotated ? group : std::min(size_t(group), cols - std::min(cols, g * group));
@@ -200,6 +187,29 @@ Model::Model(const char *path, uint64_t offset, uint64_t length)
                 t.book[0] = 0;
                 t.book[1] = float(1.2240064 / std::sqrt(128.));
                 t.book[3] = -t.book[1];
+            }
+            if (t.bits != 4) {
+                // Narrower codes are widened to nibbles once, so every CQ tensor uses the same
+                // kernels. The codebook is per tensor, so the values do not change.
+                const size_t width = t.bits == 5 ? 2 : t.bits, row_bytes = t.padded / 2;
+                t.nibbles.assign(size_t(t.shape[0]) * row_bytes, 0);
+                for (size_t r = 0; r < t.shape[0]; ++r) {
+                    const uint8_t *codes = t.data + r * t.padded * width / 8;
+                    uint8_t *row = t.nibbles.data() + r * row_bytes;
+                    for (size_t i = 0; i < t.padded; ++i) {
+                        const size_t bit = i * width;
+                        unsigned index = codes[bit / 8] >> (bit % 8);
+                        if (bit % 8 + width > 8)
+                            index |= unsigned(codes[bit / 8 + 1]) << (8 - bit % 8);
+                        index &= (1u << width) - 1;
+                        if (t.bits == 5 && index == 2)
+                            throw std::invalid_argument("Invalid ternary code");
+                        row[i / 2] |= uint8_t(index << (i % 2 * 4));
+                    }
+                }
+                t.data = t.nibbles.data();
+                t.bits = 4;
+                t.packed_bytes = t.nibbles.size();
             }
         } else if (t.kind <= 2) {
             size_t width = t.kind == 1 ? 2 : 4;

@@ -7,3 +7,5 @@ runs/
 *.cact
 .DS_Store
 .pytest_cache/
+# The browser demo ships its own copy of the model.
+!demo/model.cact

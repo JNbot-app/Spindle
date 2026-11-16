@@ -8,7 +8,7 @@ import time
 
 import numpy as np
 
-from spindle.prompt import render_prompt, render_tools
+from spindle.prompt import THINK_END, THINK_START, render_prompt, render_tools
 from spindle.tokenizer import Tokenizer
 from .engine import Engine
 from .filters import filter_calls
@@ -22,8 +22,11 @@ def snake(name):
     return re.sub(r'[^\w]+', '_', value).strip('_').lower()
 
 
-def normalize_schema(schema):
-    """(schema with snake_case property names, {snake name: (original name, child aliases)})."""
+def normalize_schema(schema, closed=True):
+    """(schema with snake_case property names, {snake name: (original name, child aliases)}).
+
+    `closed` forbids arguments the schema does not list (what the grammar needs). The prompt
+    uses the open form: the schema as the caller wrote it, as the model saw schemas in training."""
     if isinstance(schema, bool):
         return schema, {}
     if not isinstance(schema, dict):
@@ -35,29 +38,29 @@ def normalize_schema(schema):
             key = snake(name)
             if not key or key in properties:
                 raise ValueError(f'Property names collide after normalization: {name}')
-            properties[key], children = normalize_schema(child)
+            properties[key], children = normalize_schema(child, closed)
             aliases[key] = (name, children)
         result['properties'] = properties
         if 'required' in result:
             result['required'] = [snake(name) for name in result['required']]
-    if ('properties' in result or result.get('type') == 'object') and 'additionalProperties' not in result:
+    if closed and ('properties' in result or result.get('type') == 'object') and 'additionalProperties' not in result:
         result['additionalProperties'] = False
     if isinstance(result.get('additionalProperties'), dict):
-        result['additionalProperties'], _ = normalize_schema(result['additionalProperties'])
+        result['additionalProperties'], _ = normalize_schema(result['additionalProperties'], closed)
     if isinstance(result.get('items'), dict):
-        result['items'], aliases['[]'] = normalize_schema(result['items'])
+        result['items'], aliases['[]'] = normalize_schema(result['items'], closed)
     for keyword in ('oneOf', 'anyOf', 'allOf'):
         if keyword in result:
             branches = []
             for branch in result[keyword]:
-                normalized, children = normalize_schema(branch)
+                normalized, children = normalize_schema(branch, closed)
                 branches.append(normalized)
                 _merge_aliases(aliases, children)
             result[keyword] = branches
     if 'prefixItems' in result:
         items = []
         for index, child in enumerate(result['prefixItems']):
-            normalized, aliases[f'[{index}]'] = normalize_schema(child)
+            normalized, aliases[f'[{index}]'] = normalize_schema(child, closed)
             items.append(normalized)
         result['prefixItems'] = items
     return result, aliases
@@ -88,7 +91,8 @@ def restore(value, aliases):
 def constrained_log_probability(logits, token, sampler, top_k=32, window=12.0):
     """log p(token) renormalised over the grammar-valid tokens among the top k candidates."""
     values = np.asarray(logits, dtype=np.float64)
-    full = float(values[token] - np.logaddexp.reduce(values))
+    top = values.max()
+    full = float(values[token] - top - np.log(np.exp(values - top).sum()))
     if full > -1e-4:
         return full
     close = np.flatnonzero(values >= values[token] - window)
@@ -145,25 +149,38 @@ class Spindle:
     `suppressed_calls`, with the reason in `suppressed_reasons` (see filters.py). Calls below
     `min_call_probability` are suppressed too (0 keeps every call).
 
-    `window` sets the attention window in tokens (0: the model's own, 512). A larger window helps
-    when long tool lists push the needed tool out of view, at some extra latency. The tool part of
-    the prompt is cached, so requests with the same tools skip most of its prefill.
+    `window` sets the attention window in tokens (0: the model's own, 1024 for the base model).
+    `threads` is the size of the worker team (0: half the performance cores, at most four). The
+    tool part of the prompt is cached, so requests with the same tools skip most of its prefill.
+
+    The prompt shows each tool as you wrote it (names in snake_case), and a timestamp in the
+    system prompt is rewritten to the date fact the model was trained on (see prompt.py).
+
+    With `reasoning` on (the default), a model that wants to write a short note before its calls
+    may do so; the note is returned as `reasoning`. It makes copied values more exact and costs
+    some extra tokens. Models trained without notes answer with calls right away.
     """
 
-    def __init__(self, model, tools=None, *, system='', library=None, threads=4, filters=True,
-                 min_call_probability=0.0, window=0):
+    def __init__(self, model, tools=None, *, system='', library=None, threads=0, filters=True,
+                 min_call_probability=0.0, window=0, reasoning=True):
         self.engine = Engine(model, library=library, threads=threads, window=window)
         self.tokenizer = Tokenizer.from_archive(model)
         self.filters = filters
+        self.reasoning = reasoning
+        self._think_id = self.tokenizer.p2id.get(THINK_START)
         self.min_call_probability = min_call_probability
         self._lock = threading.RLock()
+        self._tools_key = None
         self.set_tools(tools or [], system=system)
 
     def set_tools(self, tools, *, system=''):
         """Replace the tools and system prompt without reloading the model."""
         if isinstance(tools, str):
             tools = json.loads(tools)
-        normalized, aliases = [], {}
+        key = json.dumps([tools, system], sort_keys=True, default=str)
+        if key == self._tools_key:  # same tools as before: nothing to prepare again
+            return
+        normalized, shown, aliases = [], [], {}
         for entry in tools:
             entry = entry.get('function', entry) if entry.get('type') == 'function' else entry
             name = snake(entry['name'])
@@ -173,29 +190,43 @@ class Spindle:
                 expand_refs(entry.get('parameters', {'type': 'object', 'properties': {}})))
             normalized.append({'name': name, 'description': entry.get('description', ''), 'parameters': parameters})
             aliases[name] = (entry['name'], property_aliases)
+            # The prompt shows the tool as written (snake_case names only): no added fields.
+            visible = dict(entry, name=name)
+            if 'parameters' in entry:
+                visible['parameters'] = normalize_schema(entry['parameters'], closed=False)[0]
+            shown.append(visible)
         IncrementalSampler(normalized, self.tokenizer)  # validate the schemas now, not mid-request
-        prefix = 1 + len(self.tokenizer.encode(render_tools(normalized, system)))
+        prefix = 1 + len(self.tokenizer.encode(render_tools(shown, system)))
         with self._lock:
-            self.tools, self.aliases, self.system = normalized, aliases, system.strip()
+            self.tools, self.prompt_tools, self.aliases, self.system = normalized, shown, aliases, system.strip()
+            self._tools_key = key
             self.engine.set_prefix(prefix)
 
-    def __call__(self, query, max_new_tokens=256):
+    def __call__(self, query, max_new_tokens=256, require_call=False):
+        """Answer one request. `require_call` forbids the empty answer: use it for extraction and
+        classification, where some call is always right."""
         if not isinstance(query, str):
             raise TypeError('The query must be text')
         with self._lock:
             started = time.perf_counter()
-            prompt = render_prompt(self.tools, query, self.system)
+            prompt = render_prompt(self.prompt_tools, query, self.system)
             ids = [self.tokenizer.bos_id] + self.tokenizer.encode(prompt)
             if len(ids) + max_new_tokens > self.engine.context:
                 raise ValueError('Prompt plus generation budget exceeds the context length')
-            sampler = IncrementalSampler(self.tools, self.tokenizer)
+            sampler = IncrementalSampler(self.tools, self.tokenizer, require_call and bool(self.tools),
+                                         check=False)  # set_tools validated the schemas
             tracker, log_probs = _CallTracker(), {}
             self.engine.reset()
             logits = self.engine.eval(ids)
             prefill = time.perf_counter() - started
             generated = []
             for step in range(max_new_tokens):
-                token = sampler.open_id if step == 0 else sampler.select_token(logits)
+                if step == 0:  # the answer starts with a note (when the model prefers one) or the calls
+                    think = (self.reasoning and self._think_id is not None
+                             and logits[self._think_id] > logits[sampler.open_id])
+                    token = self._think_id if think else sampler.open_id
+                else:
+                    token = sampler.select_token(logits)
                 if sampler.mode == 'json' and token != sampler.close_id:
                     value = constrained_log_probability(logits, token, sampler)
                     for index in tracker.feed(sampler.pieces[token]):
@@ -206,6 +237,8 @@ class Spindle:
                     break
                 logits = self.engine.eval([token])
             complete = sampler.mode == 'done'
+            note = generated[1:generated.index(sampler.open_id)] if sampler.open_id in generated[1:] else []
+            note = self.tokenizer.decode(note).replace(THINK_END, '').strip()
             calls = sampler.json.value if complete else []
             probabilities = [math.exp(sum(v) / len(v)) for v in
                              (log_probs.get(i, [0.0]) for i in range(len(calls)))]
@@ -216,7 +249,7 @@ class Spindle:
             else:
                 kept, suppressed, reasons = calls, [], []
             return {'function_calls': self._restore(kept), 'suppressed_calls': self._restore(suppressed),
-                    'suppressed_reasons': reasons,
+                    'suppressed_reasons': reasons, 'reasoning': note,
                     'call_probabilities': probabilities, 'confidence': self.engine.confidence(),
                     'complete': complete,
                     'metrics': {'prompt_tokens': len(ids), 'cached_prompt_tokens': self.engine.prefix_reused(),

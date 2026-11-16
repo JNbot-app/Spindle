@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Spindle demo</title>
+  <meta name="description" content="A small tool-calling model that runs entirely in your browser.">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <h1>Spindle</h1>
+      <span class="tagline">Tool calling in your browser</span>
+    </div>
+    <div class="top-end">
+      <div id="status" class="status" role="status" title="Runs entirely in your browser. Nothing you type leaves this page.">
+        <span class="dot"></span><span id="status-text">Starting…</span>
+      </div>
+      <div class="menu">
+        <button id="settings-btn" class="icon-btn" type="button" aria-label="Settings" aria-expanded="false" aria-controls="settings"></button>
+        <div id="settings" class="popover" hidden>
+          <div class="popover-head">
+            <h2>Settings</h2>
+            <button id="settings-reset" class="ghost small" type="button">Reset</button>
+          </div>
+          <label class="setting">
+            <span>Attention window</span>
+            <select id="s-window">
+              <option value="0">Model default</option>
+              <option value="512">512 tokens</option>
+              <option value="1024">1024 tokens</option>
+              <option value="2048">2048 tokens</option>
+            </select>
+            <small>How far back the model reads. Larger helps with long tool lists.</small>
+          </label>
+          <label class="setting">
+            <span>Max output</span>
+            <select id="s-tokens">
+              <option value="128">128 tokens</option>
+              <option value="256">256 tokens</option>
+              <option value="512">512 tokens</option>
+              <option value="1024">1024 tokens</option>
+            </select>
+          </label>
+          <label class="setting">
+            <span>Minimum certainty <output id="s-certainty-out">0%</output></span>
+            <input id="s-certainty" type="range" min="0" max="90" step="5" value="0">
+            <small>Hold back calls the model is less sure about.</small>
+          </label>
+          <label class="setting inline">
+            <input id="s-filters" type="checkbox" checked>
+            <span>Hold back calls the request doesn’t ask for</span>
+          </label>
+        </div>
+      </div>
+    </div>
+    <div class="loadbar" id="status-bar" hidden><div id="status-fill"></div></div>
+  </header>
+
+  <nav id="tabs" class="tabs" role="tablist" aria-label="Tasks"></nav>
+  <div id="sets" class="sets" role="group" aria-label="Examples set" hidden></div>
+
+  <main class="layout">
+    <div class="flow">
+      <section class="card composer">
+        <div id="examples" class="chips" aria-label="Examples"></div>
+        <textarea id="input" rows="3" spellcheck="false" aria-label="Request"></textarea>
+        <div class="composer-foot">
+          <span id="progress" class="muted small" aria-live="polite"></span>
+          <button id="run" class="primary" type="button" disabled>
+            <span id="run-label">Run</span><kbd id="run-key"></kbd>
+          </button>
+        </div>
+      </section>
+      <section id="result" class="result" hidden aria-live="polite"></section>
+    </div>
+
+    <aside class="tools card" aria-labelledby="tools-title">
+      <div class="tools-head">
+        <h2 id="tools-title">Tools</h2>
+        <span id="tools-count" class="count"></span>
+        <button id="tools-reset" class="ghost small" type="button" hidden>Reset</button>
+        <div class="seg" id="tools-mode" role="group" aria-label="Tool editor view">
+          <button type="button" data-mode="visual" aria-pressed="true">Visual</button>
+          <button type="button" data-mode="json" aria-pressed="false">JSON</button>
+        </div>
+      </div>
+      <div id="tools-visual" class="tools-list"></div>
+      <textarea id="tools-json" class="mono" rows="16" spellcheck="false" aria-label="Tool definitions as JSON" hidden></textarea>
+      <p id="tools-error" class="error" hidden></p>
+      <button id="tools-add" class="ghost add" type="button">+ Add tool</button>
+    </aside>
+  </main>
+
+  <footer>
+    <span>The model is downloaded once and cached by your browser.</span>
+    <a id="source" href="https://github.com/" hidden>Source on GitHub</a>
+  </footer>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

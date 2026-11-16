@@ -28,7 +28,7 @@ def find_library(library=None):
 class Engine:
     """One model in memory with one cached request (KV cache). Not thread-safe across requests."""
 
-    def __init__(self, model, *, library=None, threads=4, window=0):
+    def __init__(self, model, *, library=None, threads=0, window=0):
         self.model = Path(model).resolve(strict=True)
         self.library = find_library(library)
         if os.name == 'nt':

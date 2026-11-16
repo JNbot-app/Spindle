@@ -385,23 +385,35 @@ class JsonState:
             self.byte(byte)
 
 
+def token_bytes(tokenizer):
+    """The bytes each token stands for. Built once per tokenizer."""
+    pieces = getattr(tokenizer, '_token_bytes', None)
+    if pieces is None:
+        pieces = tokenizer._token_bytes = [
+            bytes([int(p[3:5], 16)]) if kind == 4 else p.replace('\u2581', ' ').encode('utf-8')
+            for p, kind in zip(tokenizer.pieces, tokenizer.types)]
+    return pieces
+
+
 class IncrementalSampler:
     """Tracks the generated tool-call JSON and picks the best grammar-valid token."""
 
-    def __init__(self, tools, tokenizer):
+    def __init__(self, tools, tokenizer, require_call=False, check=True):
+        """`check=False` skips the schema validation (for tools that were validated before)."""
+        self.require_call = require_call  # the answer may not be the empty list
         alternatives = [{'type': 'object',
                          'properties': {'name': {'const': tool['name']}, 'arguments': expand_refs(tool['parameters'])},
                          'required': ['name', 'arguments'], 'additionalProperties': False} for tool in tools]
         schema = {'type': 'array', 'items': {'oneOf': alternatives} if alternatives else False}
-        Draft202012Validator.check_schema(schema)
+        if check:
+            Draft202012Validator.check_schema(schema)
         self.json = JsonState(schema)
         self.mode = 'before'  # before -> json -> closed -> done
         self.tokenizer = tokenizer
         self.open_id = tokenizer.p2id['<tool_call>']
         self.close_id = tokenizer.p2id['</tool_call>']
         self.stop_ids = {tokenizer.eos_id, tokenizer.p2id['<|im_end|>']}
-        self.pieces = [bytes([int(p[3:5], 16)]) if kind == 4 else p.replace('\u2581', ' ').encode('utf-8')
-                       for p, kind in zip(tokenizer.pieces, tokenizer.types)]
+        self.pieces = token_bytes(tokenizer)
         self.transitions = {}
 
     def transition(self, token):
@@ -425,22 +437,27 @@ class IncrementalSampler:
             state = state.clone()
             try:
                 state.feed(self.pieces[token])
-                result = (state, mode)
+                result = None if self.require_call and state.done and not state.value else (state, mode)
             except (InvalidPrefix, ValueError, UnicodeError):
                 result = None
         self.transitions[token] = result
         return result
 
     def select_token(self, logits):
-        """The most likely allowed token: try the top 32 first, then the whole vocabulary."""
+        """The most likely allowed token: the best one, then the top 32, then the whole vocabulary."""
         values = np.asarray(logits)
         if values.ndim != 1 or len(values) != len(self.pieces) or not np.isfinite(values).all():
             raise DecodingError('Invalid decoder logits')
+        best = int(values.argmax())  # the first of equal values, like the stable sorts below
+        if self.transition(best) is not None:
+            return best
         top = np.argpartition(-values, 31)[:32]
-        for order in (top[np.argsort(-values[top], kind='stable')], np.argsort(-values, kind='stable')):
-            for token in order:
-                if self.transition(int(token)) is not None:
-                    return int(token)
+        for token in top[np.argsort(-values[top], kind='stable')]:
+            if self.transition(int(token)) is not None:
+                return int(token)
+        for token in np.argsort(-values, kind='stable'):  # rare: sort everything only when needed
+            if self.transition(int(token)) is not None:
+                return int(token)
         raise DecodingError('No schema-valid continuation exists')
 
     def advance(self, token):

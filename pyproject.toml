@@ -10,6 +10,7 @@ dependencies = ["numpy", "jsonschema"]
 [project.optional-dependencies]
 train = ["jax", "flax>=0.8", "optax"]
 cuda = ["jax[cuda12]", "flax>=0.8", "optax"]
+data = ["huggingface_hub", "pyarrow"]   # spindle bench, spindle build-data
 dev = ["pytest"]
 
 [project.scripts]

@@ -29,6 +29,18 @@ def init(params, key, rank=RANK):
     return result
 
 
+def widen(lora, key, rank):
+    """The same LoRA at a higher rank: new A columns are random and new B rows are zero, so A @ B is unchanged."""
+    result = {}
+    for name, subkey in zip(LORA_TARGETS, jax.random.split(key, len(LORA_TARGETS))):
+        A, B = jnp.asarray(lora[name]['A']), jnp.asarray(lora[name]['B'])
+        layers, fan_in, old = A.shape
+        extra = jax.random.normal(subkey, (layers, fan_in, rank - old)) / np.sqrt(fan_in)
+        result[name] = {'A': jnp.concatenate([A, extra], axis=-1),
+                        'B': jnp.concatenate([B, jnp.zeros((layers, rank - old, B.shape[-1]))], axis=1)}
+    return result
+
+
 def apply(params, lora):
     """Parameters with every attention kernel replaced by kernel + A @ B."""
     attention = dict(_attention(params))

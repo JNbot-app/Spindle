@@ -22,7 +22,7 @@ static bool batched_attention() {
                     for (auto &x : k) x = random();
                     for (auto &x : v) x = random();
                     attention_prefill(q.data(), k.data(), v.data(), scores.data(), actual.data() + 1,
-                                      count, previous, window, heads, kv_heads, qdim, vdim);
+                                      count, previous, window, heads, kv_heads, qdim, vdim, nullptr);
                     if (actual.front() != 1234.f || actual.back() != 1234.f) return false;
                     for (size_t t = 0; t < count; ++t)
                         for (size_t h = 0; h < heads; ++h) {

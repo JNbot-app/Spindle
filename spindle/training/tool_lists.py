@@ -19,6 +19,8 @@ import copy
 import json
 import random
 
+from spindle.reasoning import decline_note
+
 MAX_ADDED = 3
 KEEP_UNUSED = .5
 # Common verbs: sharing one of these does not make two tools interchangeable.
@@ -99,6 +101,8 @@ def absent(row, pool, rng, fits=lambda row: True):
         return None
     needed = {row['answers'][0]['name']}
     tools = [tool for tool in row.get('tools', []) if tool['name'] not in needed]
+    if row.get('reasoning'):  # the note described the call that is now impossible
+        row = {**row, 'reasoning': decline_note(row['query'])}
     return _edited(row, tools, needed, [], pool, rng, fits)
 
 

@@ -17,9 +17,9 @@ int main(){
         std::vector<uint8_t> codes(rows*half);for(auto &c:codes)c=uint8_t(rng());t.data=codes.data();
         for(size_t j=0;j<16;++j)t.book[j]=(int(j)-7)*.037f;
         t.values.resize(rows*groups);for(size_t j=0;j<t.values.size();++j)t.values[j]=(j%17)*.031f;
-        std::vector<float> x(cols),rotated(t.padded),input(t.padded),actual(rows),expected(rows);
+        std::vector<float> x(cols),input(t.padded),actual(rows),expected(rows);
         for(auto &v:x)v=(int(rng()%255)-127)*.031f;
-        cq4_prepare_input(x.data(),cols,t.padded,1,input.data(),rotated.data());
+        cq4_prepare_input(x.data(),cols,t.padded,1,input.data(),nullptr);
         float maximum=0;for(float v:t.book)maximum=std::max(maximum,std::abs(v));
         float book_scale=maximum>0?maximum/127.f:1.f;int8_t book[16];
         for(size_t j=0;j<16;++j)book[j]=int8_t(std::clamp(int(std::round(t.book[j]*(1.f/book_scale))),-128,127));

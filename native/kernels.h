@@ -24,6 +24,9 @@ const CpuKernels &neon_kernels();
 #if defined(SPINDLE_HAVE_NEON_DOT)
 const CpuKernels &neon_dot_kernels();
 #endif
+#if defined(__wasm_simd128__)
+const CpuKernels &wasm_kernels();
+#endif
 #if defined(SPINDLE_HAVE_X86)
 const CpuKernels &sse2_kernels();
 const CpuKernels &avx2_kernels();

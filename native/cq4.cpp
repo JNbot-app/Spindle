@@ -14,21 +14,26 @@
 #endif
 
 namespace spindle {
+// Rotates each input row group by group (FWHT) and splits even and odd coefficients, the
+// layout the packed kernels read. Rows are independent, so a chunk is prepared on the team.
 void cq4_prepare_input(const float *x, size_t cols, size_t padded, size_t batch,
-                       float *inputs, float *scratch_rotated) {
+                       float *inputs, ProjectionWorkers *workers) {
     ProfileTimer timer(PHASE_MATH_FWHT);
-    for (size_t b=0;b<batch;++b) {
-        std::copy_n(x+b*cols,cols,scratch_rotated);
-        std::fill(scratch_rotated+cols,scratch_rotated+padded,0.f);
+    parallel_for(workers, batch, 8, [&](size_t b) {
+        const float *row=x+b*cols;
+        float *out=inputs+b*padded;
         for(size_t g=0;g<padded/128;++g) {
-            float *group=scratch_rotated+g*128;
+            float group[128];
+            const size_t begin=g*128,present=begin<cols ? std::min(size_t(128),cols-begin) : 0;
+            std::copy_n(row+begin,present,group);
+            std::fill(group+present,group+128,0.f);
             fwht(group,128);
             for(size_t k=0;k<64;++k) {
-                inputs[b*padded+g*64+k]=group[2*k];
-                inputs[b*padded+padded/2+g*64+k]=group[2*k+1];
+                out[g*64+k]=group[2*k];
+                out[padded/2+g*64+k]=group[2*k+1];
             }
         }
-    }
+    });
 }
 struct ProjectionJob {
     const Tensor &tensor;
@@ -130,9 +135,8 @@ void cq4_project_prepared(const Tensor &t,const float *inputs,size_t batch,float
 }
 void cq4_project(const Tensor &t,const float *x,size_t batch,float *out,size_t begin,
                  size_t rows,std::vector<float> &scratch,std::vector<float> &tile,ProjectionWorkers *workers,bool exact) {
-    scratch.resize(std::max(size_t(8192),(batch+1)*t.padded));
-    float *rotated=scratch.data(),*inputs=rotated+t.padded;
-    cq4_prepare_input(x,t.shape[1],t.padded,batch,inputs,rotated);
-    cq4_project_prepared(t,inputs,batch,out,begin,rows,tile,workers,exact);
+    scratch.resize(std::max(size_t(8192),batch*t.padded));
+    cq4_prepare_input(x,t.shape[1],t.padded,batch,scratch.data(),workers);
+    cq4_project_prepared(t,scratch.data(),batch,out,begin,rows,tile,workers,exact);
 }
 } // namespace spindle

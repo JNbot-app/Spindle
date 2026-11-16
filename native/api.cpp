@@ -45,11 +45,11 @@ uint32_t np_abi_version() { return 1; }
 np_handle *np_load(const char *path, uint64_t offset, uint64_t length, int32_t threads, char *error,
                    size_t capacity) {
     try {
-        require(path && threads > 0, "Invalid model options");
+        require(path && threads >= 0, "Invalid model options");
         (void)cpu_kernels(); // Fail unsupported diagnostic overrides before loading weights.
         auto h = std::make_unique<np_handle>();
         h->model = std::make_shared<Model>(path, offset, length);
-        h->threads = size_t(threads);
+        h->threads = threads ? size_t(threads) : default_threads(); // 0: automatic
         h->workers = std::make_shared<ProjectionWorkers>(h->threads);
         return h.release();
     } catch (const std::exception &e) {

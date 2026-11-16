@@ -20,7 +20,7 @@ typedef struct np_handle np_handle;
 typedef int32_t (*np_trace_callback)(void *, int32_t, uint32_t, const char *, int32_t,
                                      const float *, size_t);
 NP_API uint32_t np_abi_version(void);
-// threads controls packed projection workers; dense BLAS owns its scheduling.
+// threads is the worker team size (0: automatic); dense BLAS owns its scheduling.
 // C callers must finish all operations before freeing a handle.
 NP_API np_handle *np_load(const char *, uint64_t, uint64_t, int32_t, char *, size_t);
 // Clone shares immutable mapped weights; request state and scratch are independent.
