@@ -1,0 +1,248 @@
+{
+ "model": "needle3.cact (official engine)",
+ "limit": 200,
+ "results": {
+  "mobile_actions": {
+   "score": 85.5,
+   "metric": "accuracy",
+   "cases": 200,
+   "call_rate_when_needed": 100.0,
+   "decline_rate_when_not": null,
+   "groups": {},
+   "errors": 0,
+   "seconds_per_case": 0.542
+  },
+  "droidcall": {
+   "score": 41.0,
+   "metric": "accuracy",
+   "cases": 200,
+   "call_rate_when_needed": 87.0,
+   "decline_rate_when_not": null,
+   "groups": {},
+   "errors": 0,
+   "seconds_per_case": 0.3
+  },
+  "bfcl": {
+   "score": 40.5,
+   "metric": "accuracy",
+   "cases": 200,
+   "call_rate_when_needed": 85.0,
+   "decline_rate_when_not": 55.2,
+   "groups": {
+    "irrelevance": {
+     "score": 53.8,
+     "cases": 13
+    },
+    "live_irrelevance": {
+     "score": 55.6,
+     "cases": 54
+    },
+    "live_multiple": {
+     "score": 28.8,
+     "cases": 52
+    },
+    "live_parallel": {
+     "score": 66.7,
+     "cases": 3
+    },
+    "live_simple": {
+     "score": 25.0,
+     "cases": 16
+    },
+    "multiple": {
+     "score": 57.1,
+     "cases": 7
+    },
+    "parallel": {
+     "score": 38.5,
+     "cases": 13
+    },
+    "parallel_multiple": {
+     "score": 16.7,
+     "cases": 12
+    },
+    "simple_java": {
+     "score": 20.0,
+     "cases": 5
+    },
+    "simple_javascript": {
+     "score": 0.0,
+     "cases": 3
+    },
+    "simple_python": {
+     "score": 50.0,
+     "cases": 22
+    }
+   },
+   "errors": 0,
+   "seconds_per_case": 0.599
+  },
+  "when2call": {
+   "score": 64.5,
+   "metric": "accuracy",
+   "cases": 200,
+   "call_rate_when_needed": 83.3,
+   "decline_rate_when_not": 52.5,
+   "groups": {
+    "cannot_answer": {
+     "score": 50.0,
+     "cases": 68
+    },
+    "request_for_info": {
+     "score": 55.6,
+     "cases": 54
+    },
+    "tool_call": {
+     "score": 83.3,
+     "cases": 78
+    }
+   },
+   "errors": 0,
+   "seconds_per_case": 0.727
+  },
+  "tool_removed": {
+   "score": 38.0,
+   "metric": "accuracy",
+   "cases": 200,
+   "call_rate_when_needed": null,
+   "decline_rate_when_not": 38.0,
+   "groups": {},
+   "errors": 0,
+   "seconds_per_case": 0.429
+  },
+  "dstc8": {
+   "score": 36.2,
+   "metric": "field F1",
+   "cases": 200,
+   "call_rate_when_needed": 80.5,
+   "decline_rate_when_not": null,
+   "groups": {
+    "Alarm_1": {
+     "score": 28.6,
+     "cases": 3
+    },
+    "Buses_3": {
+     "score": 46.9,
+     "cases": 19
+    },
+    "Events_3": {
+     "score": 63.3,
+     "cases": 15
+    },
+    "Flights_4": {
+     "score": 25.0,
+     "cases": 6
+    },
+    "Homes_2": {
+     "score": 22.7,
+     "cases": 19
+    },
+    "Hotels_2": {
+     "score": 40.0,
+     "cases": 6
+    },
+    "Hotels_4": {
+     "score": 23.3,
+     "cases": 15
+    },
+    "Media_3": {
+     "score": 44.4,
+     "cases": 6
+    },
+    "Messaging_1": {
+     "score": 80.0,
+     "cases": 2
+    },
+    "Movies_1": {
+     "score": 16.7,
+     "cases": 7
+    },
+    "Music_3": {
+     "score": 42.9,
+     "cases": 5
+    },
+    "Payment_1": {
+     "score": 0.0,
+     "cases": 3
+    },
+    "RentalCars_3": {
+     "score": 19.6,
+     "cases": 27
+    },
+    "Restaurants_2": {
+     "score": 30.2,
+     "cases": 13
+    },
+    "RideSharing_2": {
+     "score": 0.0,
+     "cases": 2
+    },
+    "Services_1": {
+     "score": 40.0,
+     "cases": 10
+    },
+    "Services_4": {
+     "score": 43.9,
+     "cases": 13
+    },
+    "Trains_1": {
+     "score": 33.3,
+     "cases": 17
+    },
+    "Travel_1": {
+     "score": 41.7,
+     "cases": 6
+    },
+    "Weather_1": {
+     "score": 81.8,
+     "cases": 6
+    }
+   },
+   "errors": 0,
+   "seconds_per_case": 0.331
+  },
+  "snips_gold": {
+   "score": 16.5,
+   "metric": "field F1",
+   "cases": 200,
+   "call_rate_when_needed": 74.5,
+   "decline_rate_when_not": null,
+   "groups": {},
+   "errors": 0,
+   "seconds_per_case": 0.233
+  },
+  "snips_7way": {
+   "score": 11.7,
+   "metric": "field F1",
+   "cases": 200,
+   "call_rate_when_needed": 93.0,
+   "decline_rate_when_not": null,
+   "groups": {},
+   "errors": 0,
+   "seconds_per_case": 0.227
+  },
+  "rotten_tomatoes": {
+   "score": 48.5,
+   "metric": "accuracy",
+   "cases": 200,
+   "call_rate_when_needed": 99.0,
+   "decline_rate_when_not": null,
+   "groups": {},
+   "errors": 0,
+   "seconds_per_case": 0.131
+  },
+  "dbpedia": {
+   "score": 31.0,
+   "metric": "accuracy",
+   "cases": 200,
+   "call_rate_when_needed": 36.0,
+   "decline_rate_when_not": null,
+   "groups": {},
+   "errors": 1,
+   "seconds_per_case": 0.275
+  }
+ },
+ "name": "Needle 3",
+ "size_mb": 35.3,
+ "order": 2
+}

@@ -39,9 +39,9 @@ export function snake(name) {
 }
 
 /** [schema with snake_case property names, {snake name: [original name, child aliases]}].
- *  `closed` forbids arguments the schema does not list (what the grammar needs). The prompt
- *  uses the open form: the schema as the caller wrote it, as the model saw schemas in training. */
-export function normalizeSchema(schema, closed = true) {
+ *  Objects are closed (`additionalProperties: false`) unless the schema says otherwise: the grammar
+ *  needs that, and the released model also calls more accurately when the prompt shows it. */
+export function normalizeSchema(schema) {
   if (typeof schema === 'boolean') return [schema, {}];
   if (schema === null || typeof schema !== 'object') throw new Error('A JSON schema must be an object or a boolean');
   const result = structuredClone(schema), aliases = {};
@@ -51,28 +51,28 @@ export function normalizeSchema(schema, closed = true) {
       const key = snake(name);
       if (!key || key in properties) throw new Error(`Property names collide after normalization: ${name}`);
       let children;
-      [properties[key], children] = normalizeSchema(child, closed);
+      [properties[key], children] = normalizeSchema(child);
       aliases[key] = [name, children];
     }
     result.properties = properties;
     if (result.required) result.required = result.required.map(snake);
   }
-  if (closed && ('properties' in result || result.type === 'object') && !('additionalProperties' in result)) result.additionalProperties = false;
+  if (('properties' in result || result.type === 'object') && !('additionalProperties' in result)) result.additionalProperties = false;
   if (result.additionalProperties && typeof result.additionalProperties === 'object') {
-    [result.additionalProperties] = normalizeSchema(result.additionalProperties, closed);
+    [result.additionalProperties] = normalizeSchema(result.additionalProperties);
   }
-  if (result.items && typeof result.items === 'object') [result.items, aliases['[]']] = normalizeSchema(result.items, closed);
+  if (result.items && typeof result.items === 'object') [result.items, aliases['[]']] = normalizeSchema(result.items);
   for (const keyword of ['oneOf', 'anyOf', 'allOf']) {
     if (!result[keyword]) continue;
     result[keyword] = result[keyword].map((branch) => {
-      const [normalized, children] = normalizeSchema(branch, closed);
+      const [normalized, children] = normalizeSchema(branch);
       mergeAliases(aliases, children);
       return normalized;
     });
   }
   if (result.prefixItems) {
     result.prefixItems = result.prefixItems.map((child, i) => {
-      const [normalized, children] = normalizeSchema(child, closed);
+      const [normalized, children] = normalizeSchema(child);
       aliases[`[${i}]`] = children;
       return normalized;
     });
@@ -171,9 +171,9 @@ export class Spindle {
       if (!name || name in aliases) throw new Error(`Tool names collide after normalization: ${entry.name}`);
       const [parameters, propertyAliases] = normalizeSchema(expandRefs(entry.parameters ?? { type: 'object', properties: {} }));
       normalized.push({ name, description: entry.description ?? '', parameters });
-      // The prompt shows each tool as it was written: snake_case names, no added fields.
+      // The prompt shows each tool as written, with snake_case names and closed objects.
       const visible = { ...entry, name };
-      if ('parameters' in entry) [visible.parameters] = normalizeSchema(entry.parameters, false);
+      if ('parameters' in entry) [visible.parameters] = normalizeSchema(entry.parameters);
       shown.push(visible);
       aliases[name] = [entry.name, propertyAliases];
     }

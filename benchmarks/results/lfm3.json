@@ -1,0 +1,78 @@
+{
+ "results": {
+  "mobile_actions": {
+   "score": 87.0,
+   "metric": "accuracy",
+   "cases": 200,
+   "seconds_per_case": 5.12
+  },
+  "droidcall": {
+   "score": 50.0,
+   "metric": "accuracy",
+   "cases": 200,
+   "seconds_per_case": 4.58
+  },
+  "bfcl": {
+   "score": 73.0,
+   "metric": "accuracy",
+   "cases": 200,
+   "seconds_per_case": 6.06
+  },
+  "when2call": {
+   "score": 68.0,
+   "metric": "accuracy",
+   "cases": 200,
+   "seconds_per_case": 6.74
+  },
+  "tool_removed": {
+   "score": 65.5,
+   "metric": "accuracy",
+   "cases": 200,
+   "seconds_per_case": 4.8
+  },
+  "dstc8": {
+   "score": 44.8,
+   "metric": "field F1",
+   "cases": 200,
+   "seconds_per_case": 12.13
+  },
+  "snips_gold": {
+   "score": 30.5,
+   "metric": "field F1",
+   "cases": 200,
+   "seconds_per_case": 9.32
+  },
+  "snips_7way": {
+   "score": 26.8,
+   "metric": "field F1",
+   "cases": 200,
+   "seconds_per_case": 12.78
+  },
+  "rotten_tomatoes": {
+   "score": 15.5,
+   "metric": "accuracy",
+   "cases": 200,
+   "call_rate_when_needed": 17.5,
+   "decline_rate_when_not": null,
+   "groups": {},
+   "errors": 0,
+   "seconds_per_case": 20.67
+  },
+  "dbpedia": {
+   "score": 79.5,
+   "metric": "accuracy",
+   "cases": 200,
+   "call_rate_when_needed": 89.5,
+   "decline_rate_when_not": null,
+   "groups": {},
+   "errors": 0,
+   "seconds_per_case": 11.35
+  }
+ },
+ "model": "LFM3-1.7B-Q4_K_M.gguf (llama.cpp)",
+ "name": "LFM3-1.7B",
+ "size_mb": 1099.6,
+ "order": 3,
+ "note": "Rotten Tomatoes: the model wrote text until the 512-token limit on most cases instead of calling the tool.",
+ "limit": 200
+}

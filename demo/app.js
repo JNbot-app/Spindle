@@ -2,8 +2,8 @@ import { TASKS } from './examples.js';
 import { $, el, icon, iconButton } from './dom.js';
 import { createToolsEditor } from './tools-editor.js';
 
-const MODEL_URLS = ['model.cact', '../models/model.cact']; // deployed copy, then the repo copy for local use
-const CACHE_NAME = 'spindle-model-v1';
+const MODEL_URLS = ['spindle.cact', '../models/spindle.cact']; // deployed copy, then the repo copy for local use
+const CACHE_NAME = 'spindle-model-0.1.0';
 
 // ---------------------------------------------------------------- model loading
 const worker = new Worker('worker.js', { type: 'module' });

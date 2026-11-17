@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 196" width="840" height="196" role="img" aria-label="How a request flows through Spindle: tools and request, prompt with cached tool prefix, the model, grammar-constrained decoding, checks, then calls with a probability each.">
+<style>
+svg{--ink:#1f2328;--ink2:#59636e;--line:#d1d9e0;--box:#f6f8fa;--accent:#2a78d6;--accentbg:#eaf2fc}
+@media (prefers-color-scheme: dark){svg{--ink:#f0f6fc;--ink2:#9198a1;--line:#3d444d;--box:#151b23;--accent:#3987e5;--accentbg:#14243a}}
+text{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;fill:var(--ink)}
+.t{font-size:13.5px;font-weight:600}.d{font-size:11.5px;fill:var(--ink2)}.k{font-size:10.5px;font-weight:600;fill:var(--ink2);letter-spacing:.06em}
+.b{fill:var(--box);stroke:var(--line);stroke-width:1}.m{fill:var(--accentbg);stroke:var(--accent);stroke-width:1.5}
+.a{stroke:var(--ink2);stroke-width:1.5;fill:none}.h{fill:var(--ink2)}
+</style>
+<defs><marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path class="h" d="M0,0 L8,4 L0,8 z"/></marker></defs>
+<text class="k" x="0" y="14">INPUT</text>
+<text class="k" x="181" y="14">ON-DEVICE ENGINE</text>
+<text class="k" x="705" y="14">OUTPUT</text>
+
+<rect class="b" x="0" y="26" width="140" height="150" rx="8"/>
+<text class="t" x="14" y="52">Tools + request</text>
+<text class="d" x="14" y="76">Your app's tools as</text>
+<text class="d" x="14" y="92">JSON Schema, and</text>
+<text class="d" x="14" y="108">what the user said</text>
+<text class="d" x="14" y="140">"Remind me to call</text>
+<text class="d" x="14" y="156">Ana at 5"</text>
+
+<line class="a" x1="144" y1="101" x2="176" y2="101" marker-end="url(#arrow)"/>
+
+<rect class="b" x="181" y="26" width="120" height="150" rx="8"/>
+<text class="t" x="195" y="52">Prompt</text>
+<text class="d" x="195" y="76">Tools first; their</text>
+<text class="d" x="195" y="92">part is cached, so</text>
+<text class="d" x="195" y="108">repeat requests</text>
+<text class="d" x="195" y="124">skip it</text>
+
+<line class="a" x1="305" y1="101" x2="337" y2="101" marker-end="url(#arrow)"/>
+
+<rect class="m" x="342" y="26" width="168" height="150" rx="8"/>
+<text class="t" x="356" y="52">Model · 75 MB</text>
+<text class="d" x="356" y="76">20 layers, 4-bit weights</text>
+<text class="d" x="356" y="92">Monarch MLP mixing</text>
+<text class="d" x="356" y="108">Runtime LoRA</text>
+<text class="d" x="356" y="124">8-bit KV cache</text>
+<text class="d" x="356" y="156">CPU or WebAssembly</text>
+
+<line class="a" x1="514" y1="101" x2="546" y2="101" marker-end="url(#arrow)"/>
+
+<rect class="b" x="551" y="26" width="134" height="150" rx="8"/>
+<text class="t" x="565" y="52">Decode + check</text>
+<text class="d" x="565" y="76">Grammar from the</text>
+<text class="d" x="565" y="92">schemas: every call</text>
+<text class="d" x="565" y="108">parses and fits</text>
+<text class="d" x="565" y="140">Calls the request</text>
+<text class="d" x="565" y="156">does not support drop</text>
+
+<line class="a" x1="689" y1="101" x2="700" y2="101" marker-end="url(#arrow)"/>
+
+<rect class="b" x="705" y="26" width="135" height="150" rx="8"/>
+<text class="t" x="719" y="52">Calls</text>
+<text class="d" x="719" y="76">create_reminder(</text>
+<text class="d" x="719" y="92">&#160;&#160;title: "call Ana",</text>
+<text class="d" x="719" y="108">&#160;&#160;time: "17:00")</text>
+<text class="d" x="719" y="140">+ a probability per</text>
+<text class="d" x="719" y="156">call, or no call</text>
+</svg>

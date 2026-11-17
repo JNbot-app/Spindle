@@ -5,13 +5,27 @@ description = "A small tool-calling model for on-device use: inference and fine-
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
+keywords = ["tool calling", "function calling", "on-device", "small language model", "quantization"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: C++",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = ["numpy", "jsonschema"]
 
 [project.optional-dependencies]
 train = ["jax", "flax>=0.8", "optax"]
 cuda = ["jax[cuda12]", "flax>=0.8", "optax"]
 data = ["huggingface_hub", "pyarrow"]   # spindle bench, spindle build-data
-dev = ["pytest"]
+dev = ["pytest", "huggingface_hub", "pyarrow"]
+
+[project.urls]
+Homepage = "https://github.com/usserwout/spindle"
+Demo = "https://usserwout.github.io/spindle/"
 
 [project.scripts]
 spindle = "spindle.cli:main"

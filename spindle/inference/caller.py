@@ -22,11 +22,11 @@ def snake(name):
     return re.sub(r'[^\w]+', '_', value).strip('_').lower()
 
 
-def normalize_schema(schema, closed=True):
+def normalize_schema(schema):
     """(schema with snake_case property names, {snake name: (original name, child aliases)}).
 
-    `closed` forbids arguments the schema does not list (what the grammar needs). The prompt
-    uses the open form: the schema as the caller wrote it, as the model saw schemas in training."""
+    Objects are closed (`additionalProperties: false`) unless the schema says otherwise: the grammar
+    needs that, and the released model also calls more accurately when the prompt shows it."""
     if isinstance(schema, bool):
         return schema, {}
     if not isinstance(schema, dict):
@@ -38,29 +38,29 @@ def normalize_schema(schema, closed=True):
             key = snake(name)
             if not key or key in properties:
                 raise ValueError(f'Property names collide after normalization: {name}')
-            properties[key], children = normalize_schema(child, closed)
+            properties[key], children = normalize_schema(child)
             aliases[key] = (name, children)
         result['properties'] = properties
         if 'required' in result:
             result['required'] = [snake(name) for name in result['required']]
-    if closed and ('properties' in result or result.get('type') == 'object') and 'additionalProperties' not in result:
+    if ('properties' in result or result.get('type') == 'object') and 'additionalProperties' not in result:
         result['additionalProperties'] = False
     if isinstance(result.get('additionalProperties'), dict):
-        result['additionalProperties'], _ = normalize_schema(result['additionalProperties'], closed)
+        result['additionalProperties'], _ = normalize_schema(result['additionalProperties'])
     if isinstance(result.get('items'), dict):
-        result['items'], aliases['[]'] = normalize_schema(result['items'], closed)
+        result['items'], aliases['[]'] = normalize_schema(result['items'])
     for keyword in ('oneOf', 'anyOf', 'allOf'):
         if keyword in result:
             branches = []
             for branch in result[keyword]:
-                normalized, children = normalize_schema(branch, closed)
+                normalized, children = normalize_schema(branch)
                 branches.append(normalized)
                 _merge_aliases(aliases, children)
             result[keyword] = branches
     if 'prefixItems' in result:
         items = []
         for index, child in enumerate(result['prefixItems']):
-            normalized, aliases[f'[{index}]'] = normalize_schema(child, closed)
+            normalized, aliases[f'[{index}]'] = normalize_schema(child)
             items.append(normalized)
         result['prefixItems'] = items
     return result, aliases
@@ -153,7 +153,7 @@ class Spindle:
     `threads` is the size of the worker team (0: half the performance cores, at most four). The
     tool part of the prompt is cached, so requests with the same tools skip most of its prefill.
 
-    The prompt shows each tool as you wrote it (names in snake_case), and a timestamp in the
+    The prompt shows each tool as you wrote it (snake_case names, closed objects), and a timestamp in the
     system prompt is rewritten to the date fact the model was trained on (see prompt.py).
 
     With `reasoning` on (the default), a model that wants to write a short note before its calls
@@ -190,10 +190,10 @@ class Spindle:
                 expand_refs(entry.get('parameters', {'type': 'object', 'properties': {}})))
             normalized.append({'name': name, 'description': entry.get('description', ''), 'parameters': parameters})
             aliases[name] = (entry['name'], property_aliases)
-            # The prompt shows the tool as written (snake_case names only): no added fields.
+            # The prompt shows the tool as written, with snake_case names and closed objects.
             visible = dict(entry, name=name)
             if 'parameters' in entry:
-                visible['parameters'] = normalize_schema(entry['parameters'], closed=False)[0]
+                visible['parameters'] = normalize_schema(entry['parameters'])[0]
             shown.append(visible)
         IncrementalSampler(normalized, self.tokenizer)  # validate the schemas now, not mid-request
         prefix = 1 + len(self.tokenizer.encode(render_tools(shown, system)))

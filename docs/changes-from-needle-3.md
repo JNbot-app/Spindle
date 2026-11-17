@@ -10,13 +10,13 @@ in three places: the MLP block, how the model is fine-tuned, and the engine that
 | Fine-tuning | LoRA on attention, merged into the 4-bit weights at export | Full fine-tune, with a separate rate for the MLP blocks and an unmerged FP16 LoRA |
 | Training loss | Cross-entropy on the answer | Same, plus weights on argument values and no-call answers, plus a span attention loss |
 | Training data | Used as given | Varied tool lists, plus "no call" rows where the needed tool is missing |
-| Attention window | 256 tokens | 512 tokens, can be raised at run time (`window`) |
-| Output | Reasoning, then calls | Calls only |
+| Attention window | 256 tokens in the file header | 1024 tokens by default, set at run time (`window`) |
+| Output | Reasoning, then calls | Calls, with an optional reasoning note |
 | Confidence | Learned confidence head | Probability of each call, measured during decoding |
 | Engine | Cactus prebuilt engines | Own C++ CPU engine that reads the new tensors |
 
 The numbers below come from development experiments on earlier checkpoints, each against a matched control.
-Full benchmarks will be added in a separate document.
+For the released model against other models, see [benchmarks](benchmarks.md).
 
 ## The finding behind most changes: 4-bit weights do not move
 
@@ -111,9 +111,8 @@ similar in spirit to supervised attention [5] and copy mechanisms [6].
 from the wrong clause, and cut-off names. A short run left out more arguments, but that went away with full
 training.
 
-The released model was trained with the first version of the targets: value positions of required string
-arguments only. `spindle finetune` uses the extended version, which covers numbers, optional arguments and the
-key position, because left-out optional arguments were the next most common error.
+`spindle finetune` covers numbers, optional arguments and the key position as well as required strings,
+because left-out optional arguments were the next most common error after wrong spans.
 
 ## 4. Loss weights
 
@@ -153,7 +152,7 @@ alone changed little; the tool-absent rows do the work.
 tool several request wordings in your data. If missing a call costs you more than a wrong call, lower
 `absent_tools` or set it to 0.
 
-## 5. A 512-token attention window
+## 5. A wider attention window
 
 Needle 3 limits decoder attention to the last 256 tokens. Tool definitions come first in the prompt, so with
 several tools the right definition was often 300-500 tokens before the answer, and the model could not see it.
@@ -186,7 +185,7 @@ domain-specific rules.
 ## 7. Inference engine
 
 Needle 3's prebuilt engines expect shared 2D mixing matrices and have no LoRA block, so they cannot run this
-model. Spindle has its own small engine (C++17, about 3,300 lines, in `native/`):
+model. Spindle has its own small engine (C++17, about 4,000 lines, in `native/`):
 
 - **Reads the file in place.** It maps the `.cact` file into memory. The Monarch factors and the LoRA are read
   as FP16 straight from the file.
@@ -220,7 +219,7 @@ memory access is less regular.
 | --- | --- | --- |
 | Monarch factors | +7.6 MB | about 15% slower |
 | Runtime LoRA | +4 MB | 3-7% slower |
-| 512-token window | KV cache ×2 (8-bit) | longer prompts cost a bit more |
+| 1024-token window | KV cache ×4 (8-bit) | longer prompts cost a bit more |
 | Tool-prefix cache | one copy of the cached state | prefill of the tool list skipped on repeat requests |
 | Span loss, loss weights | none | none |
 

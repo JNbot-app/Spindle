@@ -107,11 +107,12 @@ def run(backend, names, *, limit=0, output=None, label=''):
     for number, name in enumerate(names, 1):
         print(f'[{number}/{len(names)}] {name}', flush=True)
         results[name], details[name] = run_set(backend, name, limit)
+        if output:  # after every set, so a failure later in the run keeps what is done
+            output = Path(output)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(json.dumps({'model': label, 'limit': limit, 'results': results, 'cases': details},
+                                         ensure_ascii=False, indent=1) + '\n')
     print('\n' + table(results), flush=True)
     if output:
-        output = Path(output)
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(json.dumps({'model': label, 'limit': limit, 'results': results, 'cases': details},
-                                     ensure_ascii=False, indent=1) + '\n')
         print(f'Report: {output}', flush=True)
     return results

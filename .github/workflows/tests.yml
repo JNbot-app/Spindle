@@ -1,0 +1,38 @@
+name: Tests
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install OpenBLAS
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libopenblas-dev
+      - name: Build the engine
+        run: |
+          cmake -S native -B build/native -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/native -j
+      - name: Kernel tests
+        run: ctest --test-dir build/native --output-on-failure
+      - name: Install the package
+        run: pip install -e '.[dev]'
+      - name: Download the model
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p models
+          gh release download --repo "${{ github.repository }}" --pattern spindle.cact --dir models \
+            || echo "No release with spindle.cact yet; model tests will be skipped"
+      - name: Python tests
+        run: pytest -q
