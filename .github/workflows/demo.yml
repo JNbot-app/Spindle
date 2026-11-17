@@ -1,11 +1,10 @@
 name: Deploy demo
-# Publishes demo/ to GitHub Pages. In the repository settings, set Pages > Source to "GitHub Actions".
+# Publishes demo/ to GitHub Pages with the model from the latest release.
+# In the repository settings, set Pages > Source to "GitHub Actions".
 on:
   push:
     branches: [main]
     paths: ['demo/**', '.github/workflows/demo.yml']
-  release:
-    types: [published]
   workflow_dispatch:
 
 permissions:

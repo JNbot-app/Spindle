@@ -53,7 +53,8 @@ different order.
 
 ## Deploy
 
-`.github/workflows/demo.yml` publishes `demo/` to GitHub Pages on every push to `main` that touches it and on
-every new release. It downloads `spindle.cact` from the latest release, so the model never enters the git history.
-In the repository settings, set **Pages > Source** to **GitHub Actions**. When you release a new model, also
-change `CACHE_NAME` in `app.js`, so browsers that cached the old file download the new one.
+`.github/workflows/demo.yml` publishes `demo/` to GitHub Pages on every push to `main` that touches it, or by
+hand (`gh workflow run demo.yml`). It downloads `spindle.cact` from the latest release, so the model never
+enters the git history. In the repository settings, set **Pages > Source** to **GitHub Actions**. When you
+release a new model, change `CACHE_NAME` in `app.js` and push: browsers that cached the old file then download
+the new one, and the push deploys the page with the new model.
