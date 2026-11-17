@@ -25,7 +25,7 @@ const phone = [
   tool('send_message', 'Send a text message to a contact.', { contact: str('Name of the contact'), text: str('Message text') }, ['contact', 'text']),
   tool('set_alarm', 'Set an alarm.', { time: str('Time of day, e.g. 07:30'), label: str('Optional name for the alarm') }, ['time']),
   tool('get_weather', 'Get the current weather for a city.', { city: str('City name') }, ['city']),
-  tool('create_reminder', 'Create a reminder.', { text: str('What to be reminded of'), when: str('When to remind, e.g. tomorrow 9am') }, ['text']),
+  tool('create_reminder', 'Create a reminder.', { text: str('What to be reminded of'), time: str('When to remind, e.g. tomorrow 9am') }, ['text']),
   tool('call_contact', 'Start a phone call with a contact.', { contact: str('Name of the contact') }, ['contact']),
 ];
 
@@ -35,7 +35,7 @@ const travel = [
     ['origin', 'destination']),
   tool('book_hotel', 'Book a hotel room.',
     { city: str('City'), check_in: str('Check-in date'), nights: int('Number of nights'), guests: int('Number of guests') }, ['city', 'nights']),
-  tool('rent_car', 'Rent a car.', { city: str('Pick-up city'), days: int('Number of days'), type: str('', { enum: ['economy', 'suv', 'luxury'] }) }, ['city', 'days']),
+  tool('rent_car', 'Rent a car.', { city: str('Pick-up city'), days: int('Number of days'), type: str('Car type', { enum: ['economy', 'suv', 'luxury'] }) }, ['city', 'days']),
   tool('get_exchange_rate', 'Get the exchange rate between two currencies.', { from: str('Currency code, e.g. EUR'), to: str('Currency code, e.g. USD') }, ['from', 'to']),
 ];
 
@@ -57,7 +57,7 @@ const invoiceRecord = record('record_invoice', 'Save the details of an invoice.'
   issue_date: str('Date the invoice was issued'),
   due_date: str('Date the invoice has to be paid'),
   total: num('Total amount to pay'),
-  currency: str('', { enum: ['EUR', 'USD', 'GBP'] }),
+  currency: str('Currency code', { enum: ['EUR', 'USD', 'GBP'] }),
 }, ['vendor', 'total']);
 
 const contactRecord = record('record_contact', 'Save a person\'s contact details.', {
@@ -87,12 +87,12 @@ const products = [tool('search_products', 'Search the shop with filters.', {
   category: str('Product category', { enum: ['shoes', 'laptops', 'phones', 'jackets', 'headphones'] }),
   max_price: num('Maximum price in euros'),
   color: str('Color'),
-  sort_by: str('', { enum: ['price_low_to_high', 'price_high_to_low', 'rating', 'newest'] }),
+  sort_by: str('Sort order', { enum: ['cheapest', 'most_expensive', 'best_rated', 'newest'] }),
 }, ['category'])];
 
 const restaurants = [tool('find_restaurants', 'Find restaurants with filters.', {
   city: str('City'),
-  cuisine: str('Type of food'),
+  cuisine: str('Kind of food, e.g. italian or thai'),
   max_distance_km: num('Maximum distance in kilometers'),
   open_now: bool('Only places that are open right now'),
   vegetarian: bool('Only places with vegetarian options'),
@@ -111,22 +111,22 @@ export const TASKS = [
         e('Dim a light', 'Dim the living room lights to 30 percent'),
         e('Two actions', 'Lock the front door and turn off the kitchen light'),
         e('Music', 'Play some jazz in the bedroom'),
-        e('Temperature', 'Make it 21 degrees in here'),
+        e('Temperature', 'Set the heating to 21 degrees celsius'),
         e('Timer', 'Start a 15 minute timer called laundry'),
         e('Unlock', 'Unlock the back door'),
       ] },
       { name: 'Phone assistant', tools: phone, examples: [
         e('Message', 'Text Anna that I will be ten minutes late'),
-        e('Alarm + weather', 'Wake me up at 6:45 and tell me the weather in Berlin'),
+        e('Alarm', 'Set an alarm for 7:30 called gym'),
+        e('Weather', "What's the weather like in Berlin?"),
         e('Reminder', 'Remind me to buy milk tomorrow at 9am'),
         e('Call', 'Call my brother Tom'),
-        e('Two messages', 'Tell Mom I landed safely and text Dave that dinner is at 8'),
       ] },
       { name: 'Travel', tools: travel, examples: [
         e('Flights', 'Find a flight from Brussels to Lisbon on March 3rd for 2 people'),
         e('Hotel + car', 'Book a hotel in Rome for 4 nights and rent a luxury car for 3 days there'),
         e('Exchange rate', 'What is the EUR to USD exchange rate?'),
-        e('Car rental', 'Rent an suv in Denver for 5 days'),
+        e('Car rental', 'I need an SUV in Denver for 5 days'),
       ] },
     ],
   },
@@ -142,12 +142,12 @@ export const TASKS = [
         e('Webinar', 'Reminder: "Intro to Rust for Python Developers" webinar, hosted by David Kim, on 3 December 2026 from 18:00 to 19:30 (online).'),
       ] },
       { name: 'Invoice', tools: invoiceRecord, examples: [
-        e('Hosting', 'ACME Hosting Ltd - Invoice #INV-2041, issued 2026-03-02. Cloud servers (March): 480.00 EUR. Total due: 480.00 EUR. Please pay by 2026-03-30.'),
-        e('Design studio', 'Invoice 7731 from Blue Pixel Studio. Date: 12 Jan 2026. Logo design $1,200 + brand guide $800 = $2,000 total, due 11 Feb 2026.'),
-        e('Utilities', 'Thank you for choosing GreenPower. Your invoice GP-88213 for the period of April is £142.55. The invoice date is 1 May 2026 and payment is due on 15 May 2026.'),
+        e('Design studio', 'Blue Pixel Studio - invoice no. BP-7731 - 12 Jan 2026. Logo design and brand guide. Amount due: USD 2000 by 11 Feb 2026.'),
+        e('Hosting', 'ACME Hosting Ltd, issued 2026-03-02. Cloud servers for March. Total due: 480.00 EUR, to be paid by 2026-03-30.'),
+        e('Utilities', 'GreenPower, 1 May 2026. Electricity for April. Amount due: 142.55 GBP by 15 May 2026.'),
       ] },
       { name: 'Contact', tools: contactRecord, examples: [
-        e('Email signature', 'Best regards,\nJulia Fernandez\nHead of Marketing, Northwind Traders\njulia.fernandez@northwind.example | +32 470 12 34 56'),
+        e('Email signature', 'Best regards,\nJulia Fernandez, Head of Marketing at Northwind Traders\nEmail: julia.fernandez@northwind.example\nPhone: +32 470 12 34 56'),
         e('Short intro', 'Contact me: Sofia Lindqvist, sofia@lindqvist.example, 070-123 45 67'),
         e('Chat message', 'hey, you should talk to Liam O\'Connor at Brightwave. his number is 0471 98 76 54 and mail is liam@brightwave.example'),
       ] },
@@ -184,14 +184,14 @@ export const TASKS = [
       { name: 'Online shop', tools: products, examples: [
         e('Shoes', 'black running shoes under 80 euros, cheapest first'),
         e('Laptop', 'show me the best rated laptops below 900 euro'),
-        e('Jacket', 'newest red jackets'),
-        e('Headphones', 'white headphones, highest rated first, max 150 euros'),
+        e('Jacket', 'the newest red jackets under 120 euros'),
+        e('Headphones', 'white headphones under 150 euros, best rated first'),
         e('Phone', 'cheapest phones under 300 euro'),
       ] },
       { name: 'Restaurants', tools: restaurants, examples: [
         e('Open now', 'italian restaurants in Ghent that are open right now'),
-        e('Vegetarian', 'vegetarian friendly places in Utrecht within 2 km'),
-        e('Simple', 'sushi in Paris'),
+        e('Vegetarian', 'places with vegetarian options in Utrecht within 2 km'),
+        e('Pizza', 'a pizza place in Leuven that is open now'),
         e('Combined', 'thai food in Brussels, open now, vegetarian options, less than 3 km away'),
       ] },
     ],
