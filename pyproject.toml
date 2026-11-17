@@ -24,8 +24,8 @@ data = ["huggingface_hub", "pyarrow"]   # spindle bench, spindle build-data
 dev = ["pytest", "huggingface_hub", "pyarrow"]
 
 [project.urls]
-Homepage = "https://github.com/usserwout/spindle"
-Demo = "https://usserwout.github.io/spindle/"
+Homepage = "https://github.com/JNbot-app/Spindle"
+Demo = "https://jnbot-app.github.io/Spindle/"
 
 [project.scripts]
 spindle = "spindle.cli:main"

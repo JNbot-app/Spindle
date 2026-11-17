@@ -1,8 +1,8 @@
 # Spindle
 
-[![Tests](https://github.com/usserwout/spindle/actions/workflows/tests.yml/badge.svg)](https://github.com/usserwout/spindle/actions/workflows/tests.yml)
+[![Tests](https://github.com/JNbot-app/Spindle/actions/workflows/tests.yml/badge.svg)](https://github.com/JNbot-app/Spindle/actions/workflows/tests.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Demo](https://img.shields.io/badge/demo-in%20your%20browser-2a78d6.svg)](https://usserwout.github.io/spindle/)
+[![Demo](https://img.shields.io/badge/demo-in%20your%20browser-2a78d6.svg)](https://jnbot-app.github.io/Spindle/)
 
 **A 75 MB tool-calling model that runs on a phone CPU or in a browser tab.**
 
@@ -60,11 +60,11 @@ official engine with its shipped file; LFM3-1.7B runs in llama.cpp with thinking
 ## Quick start
 
 ```sh
-git clone https://github.com/usserwout/spindle && cd spindle
+git clone https://github.com/JNbot-app/Spindle && cd Spindle
 pip install -e .
 cmake -S native -B build/native -DCMAKE_BUILD_TYPE=Release && cmake --build build/native -j
 curl -L -o models/spindle.cact --create-dirs \
-  https://github.com/usserwout/spindle/releases/latest/download/spindle.cact
+  https://github.com/JNbot-app/Spindle/releases/latest/download/spindle.cact
 ```
 
 The engine needs CMake and a C++17 compiler; on Linux also OpenBLAS (`apt install libopenblas-dev`).
