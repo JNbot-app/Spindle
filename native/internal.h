@@ -120,6 +120,10 @@ struct History {
     std::vector<float> data;
     History(size_t rows_, size_t width_) : rows(rows_), width(width_), data(rows_ * width_) {}
     void reset() { std::fill(data.begin(), data.end(), 0.f); }
+    // Decode skip: a token that skips the layer counts as zero for later tokens' taps.
+    void skip(size_t pos) {
+        if (rows) std::fill_n(data.data() + (pos % rows) * width, width, 0.f);
+    }
     void convolve(const float *, float *, size_t pos, const Tensor &, size_t dilation,
                   size_t window);
 };
@@ -127,8 +131,13 @@ struct KV {
     size_t window, heads, qdim, vdim;
     std::vector<int8_t> k, v;
     std::vector<float> ks, vs;
+    // Decode skip: slots of tokens that skipped this layer; attention does not see them.
+    std::vector<uint8_t> skipped;
+    size_t skips = 0;
     KV(size_t, size_t, size_t, size_t);
     void put(size_t, const float *, const float *);
+    void skip(size_t);
+    void clear_skips();
     // Decode attention for `group` A8 query heads sharing KV head `head` over
     // `count` ring entries from `first`. Scores needs group*count floats.
     void attend(size_t head, const float *queries, size_t group, size_t first, size_t count,
@@ -145,8 +154,8 @@ struct ConfidencePool {
     float score() const;
     size_t bytes() const;
 };
-// State after the first whole prefill chunks of a prompt, kept so the next request with the
-// same leading tokens (usually the tool list) skips their prefill.
+// State after the first `limit` tokens of a prompt, kept so the next request with the same
+// leading tokens (usually the tool list) skips their prefill.
 struct PrefixCache {
     size_t limit = 0, reused = 0;
     std::vector<int32_t> tokens, token_history;
@@ -156,6 +165,8 @@ struct PrefixCache {
 };
 struct Decoder {
     std::shared_ptr<Model> model;
+    uint64_t skip_mask = 0; // layers that decode steps skip (np_set_decode_skip; 0 = off)
+    bool decode_step = false; // the current run is one token after the prompt
     Math math;
     std::unique_ptr<ConfidencePool> confidence;
     size_t position = 0, d, n, nh, nkh, qd, vd, win, hn, sites, block_capacity;
@@ -172,6 +183,8 @@ struct Decoder {
     float *alloc(size_t);
     void run(const int32_t *, size_t, float *, float * = nullptr, Trace = {});
     void chunk(const int32_t *, size_t, float *, Trace);
+    void layer(size_t, size_t, Trace);
+    bool skips(size_t, Trace);
     void engram(const int32_t *, size_t);
     void attention(size_t, size_t, const float *, float *, Trace);
     void monarch(const Layer &, const float *, float *, size_t count = 1);
@@ -182,6 +195,7 @@ struct Decoder {
 struct np_handle {
     std::shared_ptr<spindle::Model> model;
     size_t threads = 1, window = 0, prefix = 0;
+    uint64_t skip = 0; // decode skip mask, off until np_set_decode_skip
     std::shared_ptr<spindle::ProjectionWorkers> workers;
     std::unique_ptr<spindle::Math> math;
     std::unique_ptr<spindle::Decoder> decoder;

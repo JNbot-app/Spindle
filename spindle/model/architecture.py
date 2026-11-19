@@ -47,6 +47,7 @@ class ModelConfig:
     monarch: bool = True
     kv_window: int = 0
     kv_bits: int = 8
+    skip_layers: tuple = ()        # layers that answer tokens skip (decode skip, see _Layer)
     remat: bool = True
 
 
@@ -157,11 +158,12 @@ class Engram(nn.Module):
 # ---------------------------------------------------------------- attention
 
 class Attention(nn.Module):
-    """GQA attention. `span` (training only) sows the span attention loss."""
+    """GQA attention. `span` (training only) sows the span attention loss.
+    `keep` [B, T] (decode skip): tokens that skip this layer give zero q/k/v to the conv taps of later tokens."""
     config: ModelConfig
 
     @nn.compact
-    def __call__(self, x, mask, rope, layer, span=None):
+    def __call__(self, x, mask, rope, layer, span=None, keep=None):
         c = self.config
         B = x.shape[0]
         H, KV, qd, vd = c.num_heads, c.num_kv_heads, c.qk_head_dim, c.v_head_dim
@@ -177,6 +179,8 @@ class Attention(nn.Module):
             ok = [None] + [_mask_diagonal(mask, j)[..., None] for j in range(1, n)]
 
             def tapped(z, j):
+                if j and keep is not None:
+                    z = z * keep[..., None]
                 shifted = _shift_right(z, j)
                 return shifted if ok[j] is None else shifted * ok[j]
             q = sum(taps['q'][j] * tapped(q, j) for j in range(n))
@@ -285,14 +289,14 @@ class Block(nn.Module):
     config: ModelConfig
 
     @nn.compact
-    def __call__(self, x, mask, rope, engram_kv, site_flags, layer, span):
+    def __call__(self, x, mask, rope, engram_kv, site_flags, layer, span, keep=None):
         if engram_kv is not None:
             ek, ev = engram_kv
             alpha = nn.sigmoid(jnp.einsum('btd,sbtd->sbt', _rms_unit(x), _rms_unit(ek))
                                / math.sqrt(self.config.d_model))
             x = x + jnp.einsum('s,sbt,sbtd->btd', site_flags, alpha, ev.astype(jnp.float32))
         skip = x
-        x = Attention(self.config, name='self_attn')(ZCRMSNorm()(x), mask, rope, layer, span)
+        x = Attention(self.config, name='self_attn')(ZCRMSNorm()(x), mask, rope, layer, span, keep)
         gate = nn.sigmoid(self.param('attn_gate', jinit.zeros, ()))
         x = skip + gate * ZCRMSNorm(name='post_attn_norm')(x)
         skip = x
@@ -302,30 +306,42 @@ class Block(nn.Module):
 
 
 class _Layer(nn.Module):
-    """One scanned layer: a block between multi-lane hyper-connections."""
+    """One scanned layer: a block between multi-lane hyper-connections.
+
+    Decode skip: with `answer` [B, T] (1 on answer tokens), answer tokens skip the layers in
+    config.skip_layers. A skipping token keeps its stream, writes no K/V here (other tokens do not
+    see it in this layer) and gives zero q/k/v to the conv taps. The engine skips these layers for
+    every decode step the same way, so training matches inference."""
     config: ModelConfig
 
     @nn.compact
-    def __call__(self, stream, xs, mask, local_mask, rope, engram_kv, span):
-        site_flags, is_global, hc, layer = xs
+    def __call__(self, stream, xs, mask, local_mask, rope, engram_kv, span, answer):
+        site_flags, is_global, hc, layer, skipped = xs
         if local_mask is not None:
             mask = jnp.where(is_global > 0, mask, local_mask)
+        keep = None
+        if answer is not None:
+            keep = 1 - answer * skipped
+            mask = mask & (keep > 0.5)[:, None, None, :]
         B, T, n, C = stream.shape
         xf = stream.astype(jnp.float32)
         nx = quantize.a8(_rms_unit(stream.reshape(B, T, n * C)))
         h_pre = nn.sigmoid(hc['a_pre'] * (nx @ hc['phi_pre']) + hc['b_pre'] + hc['pre_off'])
         u = jnp.einsum('btn,btnc->btc', h_pre, xf)
-        y = Block(self.config, name='block')(u, mask, rope, engram_kv, site_flags, layer, span) - u
+        y = Block(self.config, name='block')(u, mask, rope, engram_kv, site_flags, layer, span, keep) - u
         h_post = 2 * nn.sigmoid(hc['a_post'] * (nx @ hc['phi_post']) + hc['b_post'] + hc['post_off'])
         h_res = _sinkhorn(hc['a_res'] * (nx @ hc['phi_res']).reshape(B, T, n, n) + hc['b_res'])
-        return jnp.einsum('btij,btjc->btic', h_res, xf) + h_post[..., None] * y[:, :, None, :], None
+        out = jnp.einsum('btij,btjc->btic', h_res, xf) + h_post[..., None] * y[:, :, None, :]
+        if keep is not None:
+            out = jnp.where(keep[:, :, None, None] > 0.5, out, xf)
+        return out, None
 
 
 class Stack(nn.Module):
     config: ModelConfig
 
     @nn.compact
-    def __call__(self, x, mask, rope, engram_kv, span):
+    def __call__(self, x, mask, rope, engram_kv, span, answer=None):
         c = self.config
         L, n, nC = c.num_layers, c.mhc_lanes, c.mhc_lanes * c.d_model
         flags = np.zeros((L, max(1, len(c.engram_layers))), np.float32)
@@ -356,10 +372,13 @@ class Stack(nn.Module):
         scan = nn.scan(nn.remat(_Layer) if c.remat else _Layer,
                        variable_axes={'params': 0, 'intermediates': 0},
                        split_rngs={'params': True}, length=L,
-                       in_axes=(0,) + (nn.broadcast,) * 5)
+                       in_axes=(0,) + (nn.broadcast,) * 6)
+        skipped = np.asarray([float(i in c.skip_layers) for i in range(L)], np.float32)
+        if not c.skip_layers:
+            answer = None
         stream, _ = scan(c, name='layers')(
-            stream, (jnp.asarray(flags), is_global, hc, jnp.arange(L, dtype=jnp.int32)),
-            mask, local_mask, rope, engram_kv, span)
+            stream, (jnp.asarray(flags), is_global, hc, jnp.arange(L, dtype=jnp.int32), jnp.asarray(skipped)),
+            mask, local_mask, rope, engram_kv, span, answer)
         return ZCRMSNorm(name='final_norm')(jnp.mean(stream, axis=2))
 
 
@@ -385,16 +404,18 @@ class SpindleModel(nn.Module):
         pairs = [e(indices, ngram_ok, tap_ok) for e in self.engrams]
         return jnp.stack([k for k, _ in pairs]), jnp.stack([v for _, v in pairs])
 
-    def __call__(self, tokens, mask, span=None):
+    def __call__(self, tokens, mask, span=None, answer=None):
         """Logits [B, T, out_vocab], with 8-bit activations and KV as the engine runs them.
 
         `span` = (query, start, end) arrays switch on the span attention loss (training only).
+        `answer` [B, T] (1 on answer tokens) applies decode skip (config.skip_layers) as the engine does;
+        without it every token runs every layer.
         Weights are used as given: wrap them with `quantize.cq4_ste` to train for 4-bit.
         """
         c = self.config
         x = self.embedding(tokens) * math.sqrt(c.d_model)
         rope = rope_tables(c.qk_head_dim, tokens.shape[1], c.rope_theta)
-        x = self.stack(x, mask, rope, self._engram_kv(tokens, mask), span)
+        x = self.stack(x, mask, rope, self._engram_kv(tokens, mask), span, answer)
         head = self.embedding.embedding[:c.out_vocab or c.vocab_size]
         return quantize.a8(x) @ head.T
 

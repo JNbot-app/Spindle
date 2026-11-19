@@ -1,4 +1,4 @@
-"""Command line: `spindle run`, `spindle finetune`, `spindle monarch`."""
+"""Command line: `spindle run`, `spindle finetune`, `spindle bench`, `spindle pick-skip`, `spindle monarch`."""
 import argparse
 import json
 from dataclasses import fields
@@ -10,7 +10,7 @@ def _run(args):
         tools = json.load(handle)
     with Spindle(args.model, tools, system=args.system, library=args.library, threads=args.threads,
                  filters=not args.no_filters, min_call_probability=args.min_call_probability,
-                 window=args.window) as model:
+                 window=args.window, decode_skip=args.decode_skip) as model:
         queries = args.query or []
         if not queries:
             print('Type a request (Ctrl-D to quit).')
@@ -45,7 +45,8 @@ def _bench(args):
         backend = run.OpenAIBackend(args.server, args.model, key=args.key)
     else:
         backend = run.SpindleBackend(args.model, window=args.window, filters=not args.no_filters,
-                                     reasoning=not args.no_reasoning, library=args.library, threads=args.threads)
+                                     reasoning=not args.no_reasoning, library=args.library, threads=args.threads,
+                                     decode_skip=args.decode_skip)
     try:
         run.run(backend, names, limit=args.limit or (run.QUICK if args.quick else 0), output=args.output,
                 label=args.model)
@@ -59,9 +60,19 @@ def _build_data(args):
               only=args.sources, reasoning=args.reasoning, combined_share=args.combined)
 
 
+def _pick_skip(args):
+    from spindle.inference import decode_skip
+    decode_skip.main(args.model, count=args.layers, data=args.data, per_set=args.per_set, pool=args.pool,
+                     window=args.window, threads=args.threads, library=args.library)
+
+
 def _monarch(args):
     from spindle.archive import to_monarch
     print(f'Wrote {to_monarch(args.source, args.output)}')
+
+
+DECODE_SKIP_HELP = ('Faster decoding: generated tokens skip some layers (off by default). Alone it uses the '
+                    "layers the model was trained to skip; or name them, e.g. 5-8,10")
 
 
 def main(argv=None):
@@ -80,6 +91,7 @@ def main(argv=None):
                      help='Return every decoded call, also ones the request does not support')
     run.add_argument('--window', type=int, default=0,
                      help="Attention window in tokens (0: the model's own)")
+    run.add_argument('--decode-skip', nargs='?', const=True, metavar='LAYERS', help=DECODE_SKIP_HELP)
     run.add_argument('--threads', type=int, default=0, help='Worker threads (0: automatic)')
     run.add_argument('--library', help='Path to the native engine library (default: build/native)')
     run.add_argument('--metrics', action='store_true', help='Also print token counts and timing')
@@ -92,7 +104,8 @@ def main(argv=None):
     tune.add_argument('--validation', help='Validation JSONL (default: hold out rows from --train)')
     tune.add_argument('--output', required=True, help='Output folder (model.cact, training-log.jsonl, run.json)')
     for f in fields(TrainConfig):
-        tune.add_argument('--' + f.name.replace('_', '-'), type=type(f.default), default=f.default)
+        kind = (lambda v: v.lower() in ('1', 'true', 'yes')) if isinstance(f.default, bool) else type(f.default)
+        tune.add_argument('--' + f.name.replace('_', '-'), type=kind, default=f.default)
     tune.set_defaults(handler=_finetune)
 
     from spindle.bench.sets import SETS
@@ -107,6 +120,7 @@ def main(argv=None):
     bench.add_argument('--window', type=int, default=1024, help="Attention window (0: the model's own)")
     bench.add_argument('--no-filters', action='store_true', help='Score the raw decoded calls')
     bench.add_argument('--no-reasoning', action='store_true', help='Never let the model write a note before its calls')
+    bench.add_argument('--decode-skip', nargs='?', const=True, metavar='LAYERS', help=DECODE_SKIP_HELP)
     bench.add_argument('--threads', type=int, default=0, help='Worker threads (0: automatic)')
     bench.add_argument('--library', help='Path to the native engine library')
     bench.set_defaults(handler=_bench)
@@ -123,6 +137,17 @@ def main(argv=None):
     data.add_argument('--combined', type=float, default=0.0,
                       help='Share of tool-calling rows that join two requests into one (several calls)')
     data.set_defaults(handler=_build_data)
+
+    pick = commands.add_parser('pick-skip', help='Measure which layers generated tokens can skip (decode skip)')
+    pick.add_argument('model', help='.cact model file')
+    pick.add_argument('--layers', type=int, default=7, help='How many layers to pick')
+    pick.add_argument('--data', help='JSONL with {query, tools, [system]} per line (default: benchmark requests)')
+    pick.add_argument('--per-set', type=int, default=6, help='Requests per benchmark set without --data')
+    pick.add_argument('--pool', type=int, default=6, help='Layers tried per step after the first')
+    pick.add_argument('--window', type=int, default=0, help="Attention window (0: the model's own)")
+    pick.add_argument('--threads', type=int, default=0, help='Worker threads (0: automatic)')
+    pick.add_argument('--library', help='Path to the native engine library')
+    pick.set_defaults(handler=_pick_skip)
 
     monarch = commands.add_parser('monarch', help='Convert Kronecker Hadamard factors to Monarch (same outputs)')
     monarch.add_argument('source')

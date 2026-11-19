@@ -96,6 +96,12 @@ The tool part of the prompt is cached, so repeated requests with the same tools 
 A system prompt with the current date (`Spindle(..., system="Current date and time: 2025-06-02T09:30")`)
 lets the model resolve "tomorrow at noon" and "next Tuesday".
 
+**Faster decoding (decode skip, off by default).** Generated tokens can skip some layers; the prompt still
+runs every layer. `spindle-fast.cact` (same release) is trained to skip 7 of its 20 layers: load it with
+`Spindle("spindle-fast.cact", decode_skip=True)` (or `--decode-skip`) and it generates about 1.4 times
+faster, for about 1.6 points less on five tool-calling sets (400 cases). For your own model,
+`spindle pick-skip model.cact` measures which layers it can skip. [How it works](docs/changes-from-needle-3.md#8-decode-skip).
+
 ## Extraction and classification
 
 Both are tool calls. For extraction, give one tool whose parameters are the fields you want. For
@@ -146,6 +152,9 @@ The result is `runs/my-run/model.cact`. `spindle finetune -h` lists every settin
 - **Tool-list variety.** Some rows get a varied tool list, and copies of single-call rows without their
   needed tool are added with "no call" as the answer. This teaches the model to read the list instead of
   guessing from the request. Tune with `--tool-variety` and `--absent-tools` (0 turns each off).
+- **Decode skip.** `--skip-layers 5-8,10,13,15` trains the model to run without those layers for the
+  tokens it generates, and saves the list in the new file (run it with `--decode-skip`). Get a list for your
+  model with `spindle pick-skip`. Fine-tuning `spindle-fast.cact` keeps its list; `--skip-layers none` drops it.
 - **What is trained.** All weights, with their own learning rates for the backbone, the Monarch MLP factors
   and a runtime LoRA on attention. The 4-bit weights barely move under fine-tuning, so most of the learning
   goes into the FP16 parts; [the design notes](docs/changes-from-needle-3.md) explain why.

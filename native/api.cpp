@@ -100,6 +100,19 @@ int32_t np_set_prefix(np_handle *h, size_t count, char *error, size_t capacity) 
         return int32_t(0);
     });
 }
+int32_t np_set_decode_skip(np_handle *h, uint64_t mask, char *error, size_t capacity) {
+    return guard(error, capacity, [&] {
+        require(h, "Missing model handle");
+        std::lock_guard<std::mutex> lock(h->mutex);
+        size_t layers = h->model->h[10];
+        require(!(mask >> (layers - 1)), "Decode skip must keep the last layer and name existing layers");
+        h->skip = mask;
+        // Prompt tokens never skip, so the cached prompt and prefix stay valid; skipped KV slots
+        // are flagged per position, so switching mid-request is safe too.
+        if (h->decoder) h->decoder->skip_mask = mask;
+        return int32_t(0);
+    });
+}
 size_t np_prefix_reused(np_handle *h) {
     if (!h) return 0;
     std::lock_guard<std::mutex> lock(h->mutex);
@@ -210,6 +223,7 @@ int32_t np_eval(np_handle *h, const int32_t *tokens, size_t count, float *output
             h->math.reset();
             h->decoder = std::make_unique<Decoder>(h->model, h->workers, h->window);
             h->decoder->prefix.limit = h->prefix;
+            h->decoder->skip_mask = h->skip;
         }
         try {
             h->decoder->run(tokens, count, output);

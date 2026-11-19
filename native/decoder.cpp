@@ -91,6 +91,8 @@ void Decoder::reset() {
     for (auto &h : ehist)
         h.reset();
     // KV bytes need not be cleared: position masks all unwritten slots.
+    for (auto &kv : cache)
+        kv.clear_skips();
 }
 void Decoder::save_prefix(const int32_t *tokens, size_t count) {
     prefix.tokens.assign(tokens, tokens + count);
@@ -242,6 +244,8 @@ void Decoder::attention(size_t index, size_t count, const float *x, float *out, 
     size_t window =
         (model->h[16] && !(globals >> index & 1)) ? std::min(win, size_t(model->h[16])) : win;
     KV &kv = cache[index];
+    if (count > 1 && kv.skips)
+        throw std::invalid_argument("A multi-token eval cannot follow decode steps that skipped layers");
     const size_t previous = std::min(position, window - 1), entries = previous + count;
     float *queries = count > 1 ? alloc(count * qw) : nullptr;
     float *keys = count > 1 ? alloc(nkh * entries * qd) : nullptr;
@@ -517,6 +521,226 @@ void Decoder::monarch(const Layer &l, const float *x, float *out, size_t count) 
     }
     used = saved;
 }
+// Decode skip: decode steps (an eval of one token after the prompt) skip the layers in the
+// archive's skip mask (the model was fine-tuned that way, see spindle/model/architecture.py).
+// Prompt tokens never skip, even in a one-token prefill chunk. A skipped token keeps its stream,
+// is hidden from this layer's attention and gives zero q/k/v to its conv taps, as in training.
+bool Decoder::skips(size_t index, Trace trace) {
+    if (!(skip_mask >> index & 1) || !decode_step || trace.callback)
+        return false;
+    cache[index].skip(position);
+    if (model->h[19]) {
+        qhist[index].skip(position);
+        khist[index].skip(position);
+        vhist[index].skip(position);
+    }
+    return true;
+}
+// One layer for `count` tokens at `position`: lane norm, mHC, block, lane update.
+void Decoder::layer(size_t index, size_t count, Trace trace) {
+    auto tensor = [&](uint32_t i) -> const Tensor & { return model->tensor(int32_t(i)); };
+    // Loops over independent tokens run on the team (never while tracing: callbacks are serial).
+    ProjectionWorkers *team = trace.callback ? nullptr : math.workers.get();
+    used = 0;
+    const Layer &l = model->layers[index];
+    float *nx = alloc(count * n * d), *pre = alloc(count * n), *post = alloc(count * n),
+          *res = alloc(count * n * n), *u = alloc(count * d), *x = alloc(count * d),
+          *input = alloc(count * d), *attn = alloc(count * d), *mlp = alloc(count * d);
+    {
+        ProfileTimer timer_norm(PHASE_LANE_INPUT_NORM_A8);
+        parallel_for(team, count, 8, [&](size_t t) {
+            trace.emit(int32_t(index), position + t, "lane.input", -1, stream.data() + t * n * d,
+                       n * d);
+            norm(stream.data() + t * n * d, nx + t * n * d, n * d);
+            trace.quant(int32_t(index), position + t, "lane.quant", -1, nx + t * n * d, n * d);
+            a8(nx + t * n * d, n * d);
+        });
+    }
+    size_t mhc_dim = n * d;
+    size_t mhc_padded = tensor(model->mhc + 6).padded;
+    float *nx_prepared = alloc(count * mhc_padded);
+    math.prepare_input(nx, mhc_dim, mhc_padded, count, nx_prepared);
+    {
+        ProfileTimer timer_pre(PHASE_MHC_PROJ_PRE);
+        math.project_prepared(tensor(model->mhc + 6), nx_prepared, count, pre, index * n, n);
+    }
+    {
+        ProfileTimer timer_post(PHASE_MHC_PROJ_POST);
+        math.project_prepared(tensor(model->mhc + 7), nx_prepared, count, post, index * n, n);
+    }
+    {
+        ProfileTimer timer_res(PHASE_MHC_PROJ_RES);
+        math.project_prepared(tensor(model->mhc + 8), nx_prepared, count, res, index * n * n, n * n);
+    }
+    {
+        ProfileTimer timer_mix(PHASE_LANE_MIXING);
+        const float mhc_scale_pre = tensor(model->mhc).scalar(index);
+        const float *mhc_bias_pre = tensor(model->mhc + 3).floats() + index * n;
+        const float mhc_scale_post = tensor(model->mhc + 1).scalar(index);
+        const float *mhc_bias_post = tensor(model->mhc + 4).floats() + index * n;
+        parallel_for(team, count, 8, [&](size_t t) {
+            std::fill_n(u + t * d, d, 0.f);
+            for (size_t lane = 0; lane < n; ++lane) {
+                pre[t * n + lane] = sigmoid(mhc_scale_pre * pre[t * n + lane] +
+                                            mhc_bias_pre[lane] +
+                                            (lane == index % n ? 4.f : -4.f));
+                post[t * n + lane] =
+                    2.f * sigmoid(mhc_scale_post * post[t * n + lane] +
+                                  mhc_bias_post[lane] +
+                                  (lane == index % n ? 0.f : -4.f));
+                float p_val = pre[t * n + lane];
+                const float *s_lane = stream.data() + (t * n + lane) * d;
+                float *ut = u + t * d;
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+                for (size_t i = 0; i < d; i += 4)
+                    vst1q_f32(ut + i, vmlaq_n_f32(vld1q_f32(ut + i), vld1q_f32(s_lane + i), p_val));
+#else
+                for (size_t i = 0; i < d; ++i)
+                    ut[i] += p_val * s_lane[i];
+#endif
+            }
+            trace.emit(int32_t(index), position + t, "lane.mixed", -1, u + t * d, d);
+            std::copy_n(u + t * d, d, x + t * d);
+        });
+    }
+    {
+        ProfileTimer timer_engram_mix(PHASE_ENGRAM_ATTN_MIX);
+        for (size_t t = 0; t < count; ++t) {
+            for (size_t site = 0; site < sites; ++site)
+                if (model->h[32 + site] == index) {
+                    const float *ek = memory.data() + site * 2 * batch_size * d + t * d,
+                                *ev = ek + batch_size * d;
+                    size_t saved = used;
+                    float *ux = alloc(d), *uk = alloc(d);
+                    norm(x + t * d, ux, d);
+                    norm(ek, uk, d);
+                    float score = 0;
+                    for (size_t i = 0; i < d; ++i)
+                        score += ux[i] * uk[i];
+                    score = sigmoid(score / std::sqrt(float(d)));
+                    for (size_t i = 0; i < d; ++i)
+                        x[t * d + i] += score * ev[i];
+                    used = saved;
+                }
+        }
+    }
+    {
+        ProfileTimer timer_block_norm(PHASE_BLOCK_INPUT_NORM_A8);
+        const float *scale = tensor(l.norm).floats();
+        parallel_for(team, count, 8, [&](size_t t) {
+            trace.emit(int32_t(index), position + t, "block.input", -1, x + t * d, d);
+            norm(x + t * d, input + t * d, d, scale);
+            trace.emit(int32_t(index), position + t, "attn.input_norm", -1, input + t * d, d);
+            trace.quant(int32_t(index), position + t, "attn.input_quant", -1, input + t * d, d);
+            a8(input + t * d, d);
+        });
+    }
+    attention(index, count, input, attn, trace);
+    {
+        ProfileTimer timer_post_norm(PHASE_POST_ATTN_NORM);
+        const float agate_scale = sigmoid(tensor(l.agate).scalar(0));
+        const float *post_scale = tensor(l.post).floats();
+        const float *pre_scale = tensor(l.pre).floats();
+        parallel_for(team, count, 8, [&](size_t t) {
+            norm(attn + t * d, attn + t * d, d, post_scale);
+            trace.emit(int32_t(index), position + t, "block.post_attn_norm", -1, attn + t * d, d);
+            size_t i = 0;
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+            float32x4_t v_scale = vdupq_n_f32(agate_scale);
+            for (; i + 4 <= d; i += 4) {
+                float32x4_t xv = vld1q_f32(x + t * d + i);
+                float32x4_t av = vld1q_f32(attn + t * d + i);
+                vst1q_f32(x + t * d + i, vfmaq_f32(xv, v_scale, av));
+            }
+#endif
+            for (; i < d; ++i)
+                x[t * d + i] += agate_scale * attn[t * d + i];
+            norm(x + t * d, input + t * d, d, pre_scale);
+            trace.emit(int32_t(index), position + t, "block.pre_hada_norm", -1, input + t * d, d);
+        });
+    }
+    {
+        ProfileTimer timer_monarch_total(PHASE_MONARCH_TOTAL);
+        monarch(l, input, mlp, count);
+        for (size_t t = 0; t < count; ++t) {
+            const float *mlp_t = mlp + t * d;
+            trace.emit(int32_t(index), position + t, "block.hadamard", -1, mlp_t, d);
+            size_t i = 0;
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+            for (; i + 4 <= d; i += 4) {
+                float32x4_t xv = vld1q_f32(x + t * d + i);
+                float32x4_t mv = vld1q_f32(mlp_t + i);
+                vst1q_f32(x + t * d + i, vaddq_f32(xv, mv));
+            }
+#endif
+            for (; i < d; ++i)
+                x[t * d + i] += mlp_t[i];
+            trace.emit(int32_t(index), position + t, "block.output", -1, x + t * d, d);
+        }
+    }
+    {
+        ProfileTimer timer_sinkhorn(PHASE_SINKHORN);
+        const float mhc2 = tensor(model->mhc + 2).scalar(index);
+        const float *mhc5 = tensor(model->mhc + 5).floats() + index * n * n;
+        parallel_for(team, count, 8, [&](size_t t) {
+            float *r = res + t * n * n;
+            for (size_t i = 0; i < n * n; ++i)
+                r[i] = mhc2 * r[i] + mhc5[i];
+            if (sinkhorn_probabilities(r, n)) return;
+            for (int iteration = 0; iteration < 20; ++iteration)
+                for (int axis = 0; axis < 2; ++axis)
+                    for (size_t row = 0; row < n; ++row) {
+                        float maximum = -INFINITY, sum = 0;
+                        for (size_t col = 0; col < n; ++col)
+                            maximum = std::max(maximum, r[axis ? col * n + row : row * n + col]);
+                        for (size_t col = 0; col < n; ++col)
+                            sum += std::exp(r[axis ? col * n + row : row * n + col] - maximum);
+                        float total = maximum + std::log(sum);
+                        for (size_t col = 0; col < n; ++col)
+                            r[axis ? col * n + row : row * n + col] -= total;
+                    }
+            for (size_t i = 0; i < n * n; ++i)
+                r[i] = std::exp(r[i]);
+        });
+    }
+    {
+        ProfileTimer timer_update(PHASE_LANE_UPDATE);
+        // lane' = sum over lanes of r[lane][other] * other + post[lane] * (x - u). All lanes
+        // of a column are read before any is written, so the update is done in place.
+        parallel_for(team, count, 8, [&](size_t t) {
+            const float *r = res + t * n * n, *gain = post + t * n;
+            float *s = stream.data() + t * n * d;
+            const float *xt = x + t * d, *ut = u + t * d;
+            size_t i = 0;
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+            for (; i + 4 <= d; i += 4) {
+                float32x4_t lanes[8];
+                for (size_t other = 0; other < n; ++other)
+                    lanes[other] = vld1q_f32(s + other * d + i);
+                const float32x4_t diff = vsubq_f32(vld1q_f32(xt + i), vld1q_f32(ut + i));
+                for (size_t lane = 0; lane < n; ++lane) {
+                    float32x4_t value = vdupq_n_f32(0.f);
+                    for (size_t other = 0; other < n; ++other)
+                        value = vmlaq_n_f32(value, lanes[other], r[lane * n + other]);
+                    vst1q_f32(s + lane * d + i, vaddq_f32(value, vmulq_n_f32(diff, gain[lane])));
+                }
+            }
+#endif
+            for (; i < d; ++i) {
+                float lanes[8];
+                for (size_t other = 0; other < n; ++other)
+                    lanes[other] = s[other * d + i];
+                for (size_t lane = 0; lane < n; ++lane) {
+                    float value = 0;
+                    for (size_t other = 0; other < n; ++other)
+                        value += r[lane * n + other] * lanes[other];
+                    s[lane * d + i] = value + gain[lane] * (xt[i] - ut[i]);
+                }
+            }
+            trace.emit(int32_t(index), position + t, "lane.output", -1, s, n * d);
+        });
+    }
+}
 void Decoder::chunk(const int32_t *tokens, size_t count, float *hidden, Trace trace) {
     used = 0;
     engram(tokens, count);
@@ -532,209 +756,9 @@ void Decoder::chunk(const int32_t *tokens, size_t count, float *hidden, Trace tr
         for (size_t lane = 1; lane < n; ++lane)
             std::copy_n(x, d, x + lane * d);
     }
-    auto tensor = [&](uint32_t i) -> const Tensor & { return model->tensor(int32_t(i)); };
-    // Loops over independent tokens run on the team (never while tracing: callbacks are serial).
-    ProjectionWorkers *team = trace.callback ? nullptr : math.workers.get();
     for (size_t index = 0; index < model->layers.size(); ++index) {
-        used = 0;
-        const Layer &l = model->layers[index];
-        float *nx = alloc(count * n * d), *pre = alloc(count * n), *post = alloc(count * n),
-              *res = alloc(count * n * n), *u = alloc(count * d), *x = alloc(count * d),
-              *input = alloc(count * d), *attn = alloc(count * d), *mlp = alloc(count * d);
-        {
-            ProfileTimer timer_norm(PHASE_LANE_INPUT_NORM_A8);
-            parallel_for(team, count, 8, [&](size_t t) {
-                trace.emit(int32_t(index), position + t, "lane.input", -1, stream.data() + t * n * d,
-                           n * d);
-                norm(stream.data() + t * n * d, nx + t * n * d, n * d);
-                trace.quant(int32_t(index), position + t, "lane.quant", -1, nx + t * n * d, n * d);
-                a8(nx + t * n * d, n * d);
-            });
-        }
-        size_t mhc_dim = n * d;
-        size_t mhc_padded = tensor(model->mhc + 6).padded;
-        float *nx_prepared = alloc(count * mhc_padded);
-        math.prepare_input(nx, mhc_dim, mhc_padded, count, nx_prepared);
-        {
-            ProfileTimer timer_pre(PHASE_MHC_PROJ_PRE);
-            math.project_prepared(tensor(model->mhc + 6), nx_prepared, count, pre, index * n, n);
-        }
-        {
-            ProfileTimer timer_post(PHASE_MHC_PROJ_POST);
-            math.project_prepared(tensor(model->mhc + 7), nx_prepared, count, post, index * n, n);
-        }
-        {
-            ProfileTimer timer_res(PHASE_MHC_PROJ_RES);
-            math.project_prepared(tensor(model->mhc + 8), nx_prepared, count, res, index * n * n, n * n);
-        }
-        {
-            ProfileTimer timer_mix(PHASE_LANE_MIXING);
-            const float mhc_scale_pre = tensor(model->mhc).scalar(index);
-            const float *mhc_bias_pre = tensor(model->mhc + 3).floats() + index * n;
-            const float mhc_scale_post = tensor(model->mhc + 1).scalar(index);
-            const float *mhc_bias_post = tensor(model->mhc + 4).floats() + index * n;
-            parallel_for(team, count, 8, [&](size_t t) {
-                std::fill_n(u + t * d, d, 0.f);
-                for (size_t lane = 0; lane < n; ++lane) {
-                    pre[t * n + lane] = sigmoid(mhc_scale_pre * pre[t * n + lane] +
-                                                mhc_bias_pre[lane] +
-                                                (lane == index % n ? 4.f : -4.f));
-                    post[t * n + lane] =
-                        2.f * sigmoid(mhc_scale_post * post[t * n + lane] +
-                                      mhc_bias_post[lane] +
-                                      (lane == index % n ? 0.f : -4.f));
-                    float p_val = pre[t * n + lane];
-                    const float *s_lane = stream.data() + (t * n + lane) * d;
-                    float *ut = u + t * d;
-#if defined(__ARM_NEON) || defined(__ARM_NEON__)
-                    for (size_t i = 0; i < d; i += 4)
-                        vst1q_f32(ut + i, vmlaq_n_f32(vld1q_f32(ut + i), vld1q_f32(s_lane + i), p_val));
-#else
-                    for (size_t i = 0; i < d; ++i)
-                        ut[i] += p_val * s_lane[i];
-#endif
-                }
-                trace.emit(int32_t(index), position + t, "lane.mixed", -1, u + t * d, d);
-                std::copy_n(u + t * d, d, x + t * d);
-            });
-        }
-        {
-            ProfileTimer timer_engram_mix(PHASE_ENGRAM_ATTN_MIX);
-            for (size_t t = 0; t < count; ++t) {
-                for (size_t site = 0; site < sites; ++site)
-                    if (model->h[32 + site] == index) {
-                        const float *ek = memory.data() + site * 2 * batch_size * d + t * d,
-                                    *ev = ek + batch_size * d;
-                        size_t saved = used;
-                        float *ux = alloc(d), *uk = alloc(d);
-                        norm(x + t * d, ux, d);
-                        norm(ek, uk, d);
-                        float score = 0;
-                        for (size_t i = 0; i < d; ++i)
-                            score += ux[i] * uk[i];
-                        score = sigmoid(score / std::sqrt(float(d)));
-                        for (size_t i = 0; i < d; ++i)
-                            x[t * d + i] += score * ev[i];
-                        used = saved;
-                    }
-            }
-        }
-        {
-            ProfileTimer timer_block_norm(PHASE_BLOCK_INPUT_NORM_A8);
-            const float *scale = tensor(l.norm).floats();
-            parallel_for(team, count, 8, [&](size_t t) {
-                trace.emit(int32_t(index), position + t, "block.input", -1, x + t * d, d);
-                norm(x + t * d, input + t * d, d, scale);
-                trace.emit(int32_t(index), position + t, "attn.input_norm", -1, input + t * d, d);
-                trace.quant(int32_t(index), position + t, "attn.input_quant", -1, input + t * d, d);
-                a8(input + t * d, d);
-            });
-        }
-        attention(index, count, input, attn, trace);
-        {
-            ProfileTimer timer_post_norm(PHASE_POST_ATTN_NORM);
-            const float agate_scale = sigmoid(tensor(l.agate).scalar(0));
-            const float *post_scale = tensor(l.post).floats();
-            const float *pre_scale = tensor(l.pre).floats();
-            parallel_for(team, count, 8, [&](size_t t) {
-                norm(attn + t * d, attn + t * d, d, post_scale);
-                trace.emit(int32_t(index), position + t, "block.post_attn_norm", -1, attn + t * d, d);
-                size_t i = 0;
-#if defined(__ARM_NEON) || defined(__ARM_NEON__)
-                float32x4_t v_scale = vdupq_n_f32(agate_scale);
-                for (; i + 4 <= d; i += 4) {
-                    float32x4_t xv = vld1q_f32(x + t * d + i);
-                    float32x4_t av = vld1q_f32(attn + t * d + i);
-                    vst1q_f32(x + t * d + i, vfmaq_f32(xv, v_scale, av));
-                }
-#endif
-                for (; i < d; ++i)
-                    x[t * d + i] += agate_scale * attn[t * d + i];
-                norm(x + t * d, input + t * d, d, pre_scale);
-                trace.emit(int32_t(index), position + t, "block.pre_hada_norm", -1, input + t * d, d);
-            });
-        }
-        {
-            ProfileTimer timer_monarch_total(PHASE_MONARCH_TOTAL);
-            monarch(l, input, mlp, count);
-            for (size_t t = 0; t < count; ++t) {
-                const float *mlp_t = mlp + t * d;
-                trace.emit(int32_t(index), position + t, "block.hadamard", -1, mlp_t, d);
-                size_t i = 0;
-#if defined(__ARM_NEON) || defined(__ARM_NEON__)
-                for (; i + 4 <= d; i += 4) {
-                    float32x4_t xv = vld1q_f32(x + t * d + i);
-                    float32x4_t mv = vld1q_f32(mlp_t + i);
-                    vst1q_f32(x + t * d + i, vaddq_f32(xv, mv));
-                }
-#endif
-                for (; i < d; ++i)
-                    x[t * d + i] += mlp_t[i];
-                trace.emit(int32_t(index), position + t, "block.output", -1, x + t * d, d);
-            }
-        }
-        {
-            ProfileTimer timer_sinkhorn(PHASE_SINKHORN);
-            const float mhc2 = tensor(model->mhc + 2).scalar(index);
-            const float *mhc5 = tensor(model->mhc + 5).floats() + index * n * n;
-            parallel_for(team, count, 8, [&](size_t t) {
-                float *r = res + t * n * n;
-                for (size_t i = 0; i < n * n; ++i)
-                    r[i] = mhc2 * r[i] + mhc5[i];
-                if (sinkhorn_probabilities(r, n)) return;
-                for (int iteration = 0; iteration < 20; ++iteration)
-                    for (int axis = 0; axis < 2; ++axis)
-                        for (size_t row = 0; row < n; ++row) {
-                            float maximum = -INFINITY, sum = 0;
-                            for (size_t col = 0; col < n; ++col)
-                                maximum = std::max(maximum, r[axis ? col * n + row : row * n + col]);
-                            for (size_t col = 0; col < n; ++col)
-                                sum += std::exp(r[axis ? col * n + row : row * n + col] - maximum);
-                            float total = maximum + std::log(sum);
-                            for (size_t col = 0; col < n; ++col)
-                                r[axis ? col * n + row : row * n + col] -= total;
-                        }
-                for (size_t i = 0; i < n * n; ++i)
-                    r[i] = std::exp(r[i]);
-            });
-        }
-        {
-            ProfileTimer timer_update(PHASE_LANE_UPDATE);
-            // lane' = sum over lanes of r[lane][other] * other + post[lane] * (x - u). All lanes
-            // of a column are read before any is written, so the update is done in place.
-            parallel_for(team, count, 8, [&](size_t t) {
-                const float *r = res + t * n * n, *gain = post + t * n;
-                float *s = stream.data() + t * n * d;
-                const float *xt = x + t * d, *ut = u + t * d;
-                size_t i = 0;
-#if defined(__ARM_NEON) || defined(__ARM_NEON__)
-                for (; i + 4 <= d; i += 4) {
-                    float32x4_t lanes[8];
-                    for (size_t other = 0; other < n; ++other)
-                        lanes[other] = vld1q_f32(s + other * d + i);
-                    const float32x4_t diff = vsubq_f32(vld1q_f32(xt + i), vld1q_f32(ut + i));
-                    for (size_t lane = 0; lane < n; ++lane) {
-                        float32x4_t value = vdupq_n_f32(0.f);
-                        for (size_t other = 0; other < n; ++other)
-                            value = vmlaq_n_f32(value, lanes[other], r[lane * n + other]);
-                        vst1q_f32(s + lane * d + i, vaddq_f32(value, vmulq_n_f32(diff, gain[lane])));
-                    }
-                }
-#endif
-                for (; i < d; ++i) {
-                    float lanes[8];
-                    for (size_t other = 0; other < n; ++other)
-                        lanes[other] = s[other * d + i];
-                    for (size_t lane = 0; lane < n; ++lane) {
-                        float value = 0;
-                        for (size_t other = 0; other < n; ++other)
-                            value += r[lane * n + other] * lanes[other];
-                        s[lane * d + i] = value + gain[lane] * (xt[i] - ut[i]);
-                    }
-                }
-                trace.emit(int32_t(index), position + t, "lane.output", -1, s, n * d);
-            });
-        }
+        if (!skips(index, trace))
+            layer(index, count, trace);
         if (hidden) {
             float *mean = hidden + (index + 1) * d;
             std::fill_n(mean, d, 0.f);
@@ -760,12 +784,14 @@ void Decoder::run(const int32_t *tokens, size_t count, float *logits, float *hid
     ProfileScopeMode mode(count > 1);
     ProfileTimer timer_run(PHASE_EVAL_RUN);
     Profiler::record_tokens(count, count > 1);
-    // Prefix reuse covers whole chunks only and leaves at least one token, so the remaining
-    // chunks and the logits are computed exactly as in a full prefill.
-    size_t start = 0, record = 0;
+    // Prefix reuse covers the exact prefix length and leaves at least one token. With a prefix set,
+    // prefill chunks always end at the prefix, whether it is reused or recorded, so a request
+    // gives the same result with or without a cache hit.
+    size_t start = 0, record = 0, length = 0, last = 0;
+    decode_step = count == 1 && position > 0;
     if (position == 0 && !trace.callback) {
         prefix.reused = 0;
-        const size_t length = std::min(prefix.limit, count - 1) / block_capacity * block_capacity;
+        length = std::min(prefix.limit, count - 1);
         if (length && prefix.tokens.size() == length &&
             std::equal(prefix.tokens.begin(), prefix.tokens.end(), tokens)) {
             restore_prefix();
@@ -774,16 +800,19 @@ void Decoder::run(const int32_t *tokens, size_t count, float *logits, float *hid
             record = length;
         }
     }
-    for (; start < count; start += block_capacity) {
+    while (start < count) {
         size_t t = std::min(block_capacity, count - start);
+        if (start < length)
+            t = std::min(t, length - start);
         chunk(tokens + start, t, start + t == count ? hidden : nullptr, trace);
+        start += t;
+        last = t - 1;
         if (record && position == record)
             save_prefix(tokens, record);
     }
     used = 0;
     float *x = alloc(d);
     std::fill_n(x, d, 0.f);
-    size_t last = (count - 1) % block_capacity;
     {
         ProfileTimer timer_final_pool(PHASE_FINAL_POOL_NORM_A8);
         for (size_t lane = 0; lane < n; ++lane)
