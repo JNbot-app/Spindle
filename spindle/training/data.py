@@ -13,7 +13,7 @@ import json
 import numpy as np
 
 from spindle.prompt import render_example
-from . import spans
+from . import decision as decision_module, spans
 
 
 def read_rows(path):
@@ -94,7 +94,7 @@ class Dataset:
     multiple of BUCKET, so short rows do not pay for long ones."""
 
     def __init__(self, rows, tokenizer, *, max_len=512, argument_weight=1.0, no_call_weight=1.0,
-                 with_spans=False, name='data'):
+                 with_spans=False, decisions=None, name='data'):
         self.pad_id, self.max_len = tokenizer.pad_id, max_len
         self.rows, skipped = [], 0
         for i, row in enumerate(rows):
@@ -103,17 +103,21 @@ class Dataset:
                 skipped += 1
             else:
                 targets = spans.span_targets(row, tokenizer) if with_spans and row['answers'] else []
-                self.rows.append((ids, weights, spans.as_arrays(targets)))
+                self.rows.append((ids, weights, spans.as_arrays(targets),
+                                  decisions.encode(row, ids, weights) if decisions else None))
             if (i + 1) % 2000 == 0 or i + 1 == len(rows):
                 print(f'  {name}: tokenized {i + 1:,}/{len(rows):,} rows', flush=True)
         if not self.rows:
             raise ValueError(f'{name}: no rows fit in {max_len} tokens')
-        self.lengths = np.asarray([len(ids) for ids, _, _ in self.rows])
+        self.lengths = np.asarray([len(row[0]) for row in self.rows])
         if skipped:
             print(f'  {name}: skipped {skipped:,} rows longer than {max_len} tokens', flush=True)
         if with_spans:
-            targets = sum(int((s[0] > 0).sum()) for _, _, s in self.rows)
+            targets = sum(int((row[2][0] > 0).sum()) for row in self.rows)
             print(f'  {name}: {targets:,} span attention targets', flush=True)
+        if decisions:
+            print(f'  {name}: {sum(row[3] is not None for row in self.rows):,} rows with a call / no-call decision '
+                  f'for the teacher', flush=True)
         print(f'  {name}: {len(self):,} rows, mean {self.lengths.mean():.0f} tokens, '
               f'{(self.lengths > 256).mean():.0%} over 256', flush=True)
 
@@ -131,12 +135,20 @@ class Dataset:
         tokens = np.full((size, length), self.pad_id, np.int32)
         weights = np.zeros((size, length), np.float32)
         span = np.zeros((size, 3, spans.PER_ROW), np.int32)
+        teacher = np.full((size, length), self.pad_id, np.int32)
+        teacher_pos, decide_pos, decide = np.zeros(size, np.int32), np.zeros(size, np.int32), np.zeros(size, np.float32)
+        call_ids = np.full((size, decision_module.MAX_TOOLS), -1, np.int32)
         for k, index in enumerate(indices + indices[:1] * (size - len(indices))):
-            ids, row_weights, row_spans = self.rows[index]
+            ids, row_weights, row_spans, row_decision = self.rows[index]
             tokens[k, :len(ids)] = ids
             if k < len(indices):
                 weights[k, :len(ids)], span[k] = row_weights, row_spans
-        return {'tokens': tokens, 'weights': weights,
+                if row_decision is not None:
+                    teacher_ids, decide_pos[k], calls = row_decision
+                    teacher[k, :len(teacher_ids)], teacher_pos[k] = teacher_ids, len(teacher_ids) - 1
+                    call_ids[k, :len(calls)], decide[k] = calls, 1.
+        return {'tokens': tokens, 'weights': weights, 'teacher_tokens': teacher, 'teacher_pos': teacher_pos,
+                'decide_pos': decide_pos, 'decide': decide, 'call_ids': call_ids,
                 'span_query': span[:, 0], 'span_start': span[:, 1], 'span_end': span[:, 2]}
 
     def groups(self, indices, size):

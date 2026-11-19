@@ -6,7 +6,8 @@ What trains:
     tensors, so they are not limited by 4-bit rounding),
   * the runtime LoRA on the attention projections at `lora_lr` (continued when the parent
     model already has one),
-with an optional span attention loss (see spans.py). Training rows get varied tool lists and
+with an optional span attention loss (see spans.py) and an optional decision term, where a frozen
+reasoning `teacher` teaches the call / no-call choice (see decision.py). Training rows get varied tool lists and
 tool-absent copies first (see tool_lists.py); validation rows stay as they are.
 
 Training runs in rounds of `updates_per_round` updates. Each round tokenizes only its own part
@@ -32,7 +33,7 @@ from spindle import archive
 from spindle.model import quantize, runtime_lora
 from spindle.model.architecture import SpindleModel, attention_mask
 from spindle.tokenizer import Tokenizer
-from . import data, spans, tool_lists
+from . import data, decision, spans, tool_lists
 from .config import TrainConfig
 
 RESUME_WARMUP = 50  # updates of warm-up after a resume (the optimizer state is not saved)
@@ -67,11 +68,25 @@ def make_optimizer(trainable, steps, config, start=0):
     return optax.chain(optax.clip_by_global_norm(config.clip), optax.multi_transform(transforms, labels))
 
 
-def make_loss(model_config, codebook, pad_id, span_weight):
+def make_loss(model_config, codebook, pad_id, span_weight, distill_weight=0., decisions=None):
     model = SpindleModel(model_config)
     codebook = jnp.asarray(codebook)
 
-    def loss_sums(trainable, batch, with_spans=True):
+    def decision_sum(logits, batch, teacher):
+        """Cross-entropy of the student's `[]` / `[{"` choice against the teacher's chance of declining."""
+        rows = jnp.arange(logits.shape[0])
+        t_tokens = batch['teacher_tokens']
+        t_logits = model.apply({'params': teacher}, t_tokens, attention_mask(t_tokens, model_config.kv_window, pad_id))
+        p = jax.nn.softmax(jax.lax.stop_gradient(t_logits[rows, batch['teacher_pos']]).astype(jnp.float32))
+        ids = batch['call_ids']
+        call = jnp.sum(jnp.take_along_axis(p, jnp.maximum(ids, 0), axis=1) * (ids >= 0), axis=-1)
+        decline = jnp.sum(p[:, jnp.asarray(decisions.declines)], axis=-1)
+        target = decline / jnp.maximum(call + decline, 1e-9)
+        choice = logits[rows, batch['decide_pos']][:, jnp.asarray([decisions.no_call, decisions.call])]
+        choice = jax.nn.log_softmax(choice.astype(jnp.float32))
+        return jnp.sum(-(target * choice[:, 0] + (1 - target) * choice[:, 1]) * batch['decide'])
+
+    def loss_sums(trainable, batch, with_spans=True, teacher=None):
         """(weighted loss sum, weight sum); the caller divides once over the whole batch."""
         params = runtime_lora.apply(quantize.cq4_ste(trainable['model'], codebook), trainable['lora'])
         tokens = batch['tokens']
@@ -85,17 +100,20 @@ def make_loss(model_config, codebook, pad_id, span_weight):
             logits = model.apply({'params': params}, tokens, mask)
         losses = optax.softmax_cross_entropy_with_integer_labels(logits[:, :-1], tokens[:, 1:])
         weights = batch['weights'][:, 1:]
-        return jnp.sum(losses * weights) + span_weight * span_total, jnp.sum(weights)
+        total = jnp.sum(losses * weights) + span_weight * span_total
+        if teacher is not None and distill_weight:
+            total = total + distill_weight * decision_sum(logits, batch, teacher)
+        return total, jnp.sum(weights)
 
     return loss_sums
 
 
 def make_steps(loss_sums, optimizer, devices):
     """(accumulate, apply): add the gradients of one group of rows; then make one update."""
-    def accumulate(trainable, carry, batches):
+    def accumulate(trainable, carry, batches, teacher):
         def one(carry, batch):
             total, count, grads = carry
-            (value, weight), grad = jax.value_and_grad(loss_sums, has_aux=True)(trainable, batch)
+            (value, weight), grad = jax.value_and_grad(loss_sums, has_aux=True)(trainable, batch, teacher=teacher)
             return (total + value, count + weight, jax.tree.map(jnp.add, grads, grad)), None
 
         return jax.lax.scan(one, carry, batches)[0]
@@ -205,7 +223,17 @@ def finetune(parent, train_path, output, *, validation_path=None, config=TrainCo
     optimizer = make_optimizer(trainable, steps, config, start=first_round * per_round)
     state = optimizer.init(trainable)
     model_config.remat = True
-    loss_sums = make_loss(model_config, codebook, tokenizer.pad_id, config.span_weight)
+    teacher = decisions = None
+    if config.teacher and config.distill_weight:
+        print(f'Loading the reasoning teacher {config.teacher} (decision weight {config.distill_weight})', flush=True)
+        teacher, teacher_config, _, teacher_lora = archive.load(config.teacher)
+        if (teacher_config.num_layers, teacher_config.d_model, teacher_config.monarch) != \
+                (model_config.num_layers, model_config.d_model, model_config.monarch):
+            raise ValueError('The teacher must have the same architecture as the model')
+        # archive.load already gives the 4-bit values the engine uses, so no quantizer here.
+        teacher = jax.tree.map(jnp.asarray, teacher if teacher_lora is None else runtime_lora.apply(teacher, teacher_lora))
+        decisions = decision.Decisions(tokenizer)
+    loss_sums = make_loss(model_config, codebook, tokenizer.pad_id, config.span_weight, config.distill_weight, decisions)
     accumulate, apply = make_steps(loss_sums, optimizer, devices)
     evaluate = jax.jit(lambda t, b: loss_sums(t, b, with_spans=False))
     eval_size = per_call * 4
@@ -224,8 +252,10 @@ def finetune(parent, train_path, output, *, validation_path=None, config=TrainCo
 
     if devices > 1:
         # One copy per device: pmap splits the leading axis over the devices on the first call.
-        trainable, state, zero = jax.tree.map(lambda x: np.broadcast_to(np.asarray(x), (devices, *np.shape(x))),
-                                              (trainable, state, zero))
+        trainable, state, zero, teacher = jax.tree.map(
+            lambda x: np.broadcast_to(np.asarray(x), (devices, *np.shape(x))), (trainable, state, zero, teacher))
+        if teacher is not None:  # copy it to the devices once, not on every call
+            teacher = jax.pmap(lambda t: t)(teacher)
     host = (lambda tree: jax.tree.map(lambda x: x[0], tree)) if devices > 1 else (lambda tree: tree)
 
     def fits(row):
@@ -253,6 +283,7 @@ def finetune(parent, train_path, output, *, validation_path=None, config=TrainCo
                                                config.seed + round_index, fits)
         train_set = data.Dataset(chunk, tokenizer, max_len=config.max_len, argument_weight=config.argument_weight,
                                  no_call_weight=config.no_call_weight, with_spans=config.span_weight > 0,
+                                 decisions=decisions,
                                  name=f'round {round_index + 1}')
         train_rows += len(train_set)
         rng = np.random.default_rng(config.seed + round_index)
@@ -266,7 +297,7 @@ def finetune(parent, train_path, output, *, validation_path=None, config=TrainCo
             carry = zero
             for group in train_set.groups(picked, config.group_rows):
                 carry = accumulate(trainable, carry, _shard(train_set.batch(group, config.group_rows),
-                                                            devices, config.micro_batch))
+                                                            devices, config.micro_batch), teacher)
             trainable, state, loss, grad_norm = apply(trainable, state, carry)
             loss = float(np.mean(loss))
             if not math.isfinite(loss):

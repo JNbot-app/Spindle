@@ -19,6 +19,8 @@ class TrainConfig:
     lora_lr: float = 3e-3
     lora_rank: int = 16           # may be higher than the parent's rank: the extra rows start at zero
     span_weight: float = 0.5      # 0 turns span attention supervision off
+    teacher: str = ''             # reasoning .cact whose call / no-call choice is distilled (see decision.py)
+    distill_weight: float = 0.    # weight of that decision term (0: off)
     argument_weight: float = 4.0
     no_call_weight: float = 20.0
     tool_variety: float = 0.5     # chance that a call row gets a varied tool list (see tool_lists.py)
