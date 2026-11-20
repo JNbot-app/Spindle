@@ -40,7 +40,7 @@ def expand_refs(value, root=None, seen=()):
 
 
 def default_additional_properties(schema):
-    """Objects allow no extra keys unless the schema says otherwise."""
+    """Objects with listed properties allow no extra keys unless the schema says otherwise."""
     if isinstance(schema, list):
         return [default_additional_properties(item) for item in schema]
     if not isinstance(schema, dict):
@@ -56,9 +56,7 @@ def default_additional_properties(schema):
     for key in ('$defs', 'definitions'):
         if isinstance(result.get(key), dict):
             result[key] = {k: default_additional_properties(v) for k, v in result[key].items()}
-    types = result.get('type')
-    if ('properties' in result or types == 'object' or (isinstance(types, list) and 'object' in types)) \
-            and 'additionalProperties' not in result:
+    if 'properties' in result and 'additionalProperties' not in result:
         result['additionalProperties'] = False
     if isinstance(result.get('additionalProperties'), dict):
         result['additionalProperties'] = default_additional_properties(result['additionalProperties'])
@@ -95,7 +93,7 @@ def variants(schema):
             if 'additionalProperties' in part:
                 projected['additionalProperties'] = part['additionalProperties']
             projected['required'] = list(set(projected.get('required', [])) | set(part.get('required', [])))
-        if ('properties' in projected or projected.get('type') == 'object') and 'additionalProperties' not in projected:
+        if 'properties' in projected and 'additionalProperties' not in projected:
             projected['additionalProperties'] = False
         result.append(projected)
     return result

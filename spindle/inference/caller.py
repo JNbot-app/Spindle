@@ -27,8 +27,9 @@ def snake(name):
 def normalize_schema(schema):
     """(schema with snake_case property names, {snake name: (original name, child aliases)}).
 
-    Objects are closed (`additionalProperties: false`) unless the schema says otherwise: the grammar
-    needs that, and the released model also calls more accurately when the prompt shows it."""
+    Objects with listed properties are closed (`additionalProperties: false`) unless the schema says
+    otherwise: the released model calls more accurately when the prompt shows it. A free-form object
+    (`"type": "object"` without properties, a dict of any keys) stays open: closing it would only allow `{}`."""
     if isinstance(schema, bool):
         return schema, {}
     if not isinstance(schema, dict):
@@ -45,7 +46,7 @@ def normalize_schema(schema):
         result['properties'] = properties
         if 'required' in result:
             result['required'] = [snake(name) for name in result['required']]
-    if ('properties' in result or result.get('type') == 'object') and 'additionalProperties' not in result:
+    if 'properties' in result and 'additionalProperties' not in result:
         result['additionalProperties'] = False
     if isinstance(result.get('additionalProperties'), dict):
         result['additionalProperties'], _ = normalize_schema(result['additionalProperties'])
