@@ -10,6 +10,7 @@ import numpy as np
 
 from spindle.prompt import THINK_END, THINK_START, render_prompt, render_tools
 from spindle.tokenizer import Tokenizer
+from . import copying
 from .debias import EnumDebias
 from .engine import Engine
 from .filters import filter_calls
@@ -155,6 +156,8 @@ class Spindle:
     Engine.set_decode_skip): True uses the layers the model was trained to skip.
     `debias_enums` corrects the model's pull towards some labels of long enum lists, learned from
     earlier requests (off by default; see debias.py: it assumes labels come up about equally often).
+    `copy_margin` (0: off) keeps a value that is being copied from the request word for word when the
+    model would reword it halfway and the copy is at most this much less likely (see copying.py).
     `threads` is the size of the worker team (0: half the performance cores, at most four). The
     tool part of the prompt is cached, so requests with the same tools skip most of its prefill.
 
@@ -167,12 +170,14 @@ class Spindle:
     """
 
     def __init__(self, model, tools=None, *, system='', library=None, threads=0, filters=True,
-                 min_call_probability=0.0, window=0, reasoning=True, decode_skip=None, debias_enums=False):
+                 min_call_probability=0.0, window=0, reasoning=True, decode_skip=None, debias_enums=False,
+                 copy_margin=0.0):
         self.engine = Engine(model, library=library, threads=threads, window=window, decode_skip=decode_skip)
         self.tokenizer = Tokenizer.from_archive(model)
         self.filters = filters
         self.reasoning = reasoning
         self.debias = EnumDebias(self.tokenizer) if debias_enums else None
+        self.copy_margin = copy_margin
         self._think_id = self.tokenizer.p2id.get(THINK_START)
         self.min_call_probability = min_call_probability
         self._lock = threading.RLock()
@@ -235,6 +240,8 @@ class Spindle:
                     token = self.debias and self.debias.select(sampler, logits)
                     if token is None:
                         token = sampler.select_token(logits)
+                    if self.copy_margin:
+                        token = copying.guard(sampler, logits, token, query.encode('utf-8'), self.copy_margin)
                 if sampler.mode == 'json' and token != sampler.close_id:
                     value = constrained_log_probability(logits, token, sampler)
                     for index in tracker.feed(sampler.pieces[token]):

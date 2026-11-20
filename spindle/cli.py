@@ -46,7 +46,8 @@ def _bench(args):
     else:
         backend = run.SpindleBackend(args.model, window=args.window, filters=not args.no_filters,
                                      reasoning=not args.no_reasoning, library=args.library, threads=args.threads,
-                                     decode_skip=args.decode_skip, debias_enums=args.debias_enums)
+                                     decode_skip=args.decode_skip, debias_enums=args.debias_enums,
+                                     copy_margin=args.copy_margin)
     try:
         run.run(backend, names, limit=args.limit or (run.QUICK if args.quick else 0), output=args.output,
                 label=args.model)
@@ -123,6 +124,8 @@ def main(argv=None):
     bench.add_argument('--decode-skip', nargs='?', const=True, metavar='LAYERS', help=DECODE_SKIP_HELP)
     bench.add_argument('--debias-enums', action='store_true',
                        help='Correct the pull towards some labels of enum lists, learned from earlier cases')
+    bench.add_argument('--copy-margin', type=float, default=0.0,
+                       help='Keep values copied from the request word for word (log-prob margin, 0: off)')
     bench.add_argument('--threads', type=int, default=0, help='Worker threads (0: automatic)')
     bench.add_argument('--library', help='Path to the native engine library')
     bench.set_defaults(handler=_bench)
