@@ -18,10 +18,10 @@ QUICK = 200  # cases per set with --quick
 
 class SpindleBackend:
     def __init__(self, model, *, window=0, filters=True, reasoning=True, library=None, threads=0,
-                 max_new_tokens=320):
+                 max_new_tokens=320, decode_skip=None):
         from spindle import Spindle
         self.model = Spindle(model, library=library, threads=threads, filters=filters, window=window,
-                             reasoning=reasoning)
+                             reasoning=reasoning, decode_skip=decode_skip)
         self.max_new_tokens = max_new_tokens
         self.current = None
 

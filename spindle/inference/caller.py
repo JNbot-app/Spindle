@@ -150,6 +150,8 @@ class Spindle:
     `min_call_probability` are suppressed too (0 keeps every call).
 
     `window` sets the attention window in tokens (0: the model's own, 1024 for the base model).
+    `decode_skip` lets generated tokens skip some layers for faster decoding (off by default; see
+    Engine.set_decode_skip): True uses the layers the model was trained to skip.
     `threads` is the size of the worker team (0: half the performance cores, at most four). The
     tool part of the prompt is cached, so requests with the same tools skip most of its prefill.
 
@@ -162,8 +164,8 @@ class Spindle:
     """
 
     def __init__(self, model, tools=None, *, system='', library=None, threads=0, filters=True,
-                 min_call_probability=0.0, window=0, reasoning=True):
-        self.engine = Engine(model, library=library, threads=threads, window=window)
+                 min_call_probability=0.0, window=0, reasoning=True, decode_skip=None):
+        self.engine = Engine(model, library=library, threads=threads, window=window, decode_skip=decode_skip)
         self.tokenizer = Tokenizer.from_archive(model)
         self.filters = filters
         self.reasoning = reasoning

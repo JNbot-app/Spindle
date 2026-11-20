@@ -197,10 +197,11 @@ model. Spindle has its own small engine (C++17, about 4,000 lines, in `native/`)
 - **Grammar-constrained decoding** [7] from the tools' JSON Schemas, so every answer parses and every call
   fits its schema. The same pass computes the per-call probability.
 - **Tool-prefix cache.** The tool list comes first in the prompt and is the same for every request with the
-  same tools. The engine keeps its state after the tool part (whole 128-token prefill chunks) and reuses it
-  when the next prompt starts with the same tokens. The output is bit-for-bit the same; only the prefill of
-  the tool list is skipped. `metrics['cached_prompt_tokens']` shows how much was reused.
+  same tools. The engine keeps its state right after the tool part and reuses it when the next prompt
+  starts with the same tokens. Prefill chunks always end at the tool part, so a cache hit and a miss give
+  bit-for-bit the same output; only the prefill of the tool list is skipped. `metrics['cached_prompt_tokens']` shows how much was reused.
 
+- **Decode skip.** When turned on, generated tokens skip a list of layers (section 8). Off by default.
 - **Reads Needle 3 files too.** Weights stored with fewer than 4 bits (the shipped Needle 3 model uses
   2) are widened to the 4-bit layout when the file is loaded, so they use the same kernels.
 - **The prompt the model was trained on.** Tools are shown as written (only names become snake_case), and
@@ -213,6 +214,48 @@ model. Spindle has its own small engine (C++17, about 4,000 lines, in `native/`)
 Monarch costs about 15% more decode time per token than shared matrices. Its arithmetic is the same, but the
 memory access is less regular.
 
+## 8. Decode skip
+
+Generating the answer is one token at a time, and each token runs all 20 layers. Not every layer is needed
+for that. Decode skip lets generated tokens skip a list of layers. It is off unless you turn it on, and it
+assumes nothing about which layers matter: each model gets its own list, measured on that model.
+
+- **Only generated tokens skip.** The prompt (tools and request) always runs every layer, so the model
+  reads the full input with all of its depth. The last layer (the read-out) never skips.
+- **Off by default, switchable at any time.** `Spindle(..., decode_skip=True)` or `--decode-skip` uses the
+  list stored in the file; you can also name layers (`decode_skip='5-8,10'`) or turn it off again with
+  `model.engine.set_decode_skip(None)`, even between requests that share the cached prompt.
+- **Finding the list: `spindle pick-skip model.cact`.** The full model answers some requests; then each
+  candidate list replays those answers token by token with its layers skipped, and costs how much less
+  likely the model's own answer becomes. Layers are added one at a time, cheapest first. It needs no labels
+  and takes a few minutes on a laptop. Use `--data` for requests from your own task.
+- **Healing: `spindle finetune --skip-layers ...`.** In fine-tuning, answer tokens skip the same layers as
+  in the engine: a skipping token keeps its stream unchanged, writes no keys or values in that layer (later
+  tokens do not see it there), and gives zeros to that layer's q/k/v taps. A short run lets the other layers
+  take over the work. The list is saved in header fields 45-46 of the new `.cact` file (a bit mask), and
+  later fine-tunes of that file keep it (`--skip-layers none` drops it).
+
+**For the base model.** On `spindle.cact`, `pick-skip` and a learned per-token router (an earlier
+experiment) found lists of equal cost: the router dropped layers 5, 6, 7, 8, 10, 13 and 15, and the picker
+chose 1, 3, 5, 8, 13, 15 and 18 (0.063 vs 0.064 extra loss per token, 40 requests). Skipping every other
+middle layer (4, 6, ..., 16) cost 0.30, and in a full test lost about 9 points, mostly on picking the right
+tool. Which layers are skipped matters a lot, and it differs per model, which is why the list is measured.
+
+`spindle-fast.cact` is the base model healed for 1,000 updates on the general mix with layers 5, 6, 7, 8,
+10, 13 and 15 skipped. Same 400 cases (80 each from Mobile Actions, DroidCall, DSTC8, BFCL and When2Call),
+free generation with the grammar, one Apple M1 laptop:
+
+| Model | Mean | Mobile Actions | DroidCall | DSTC8 | BFCL | When2Call | Decode time per token |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| spindle.cact | 53.7 | 78.8 | 36.2 | 43.7 | 48.8 | 61.2 | 2.93 ms |
+| spindle-fast.cact, `--decode-skip` | 52.1 | 71.2 | 31.2 | 41.6 | 47.5 | 68.8 | 2.11 ms (1.39x) |
+
+The two give the same result on 339 of 400 cases; the fast model gets 27 of the others right and 34 wrong,
+a difference within noise for this many cases (McNemar p = 0.44). The largest drop is on Mobile Actions;
+When2Call goes up. With decode skip off, `spindle-fast.cact` runs every layer and
+still works (52.5 vs 50.6 with skip on, 200 of the same cases), but it is slower than `spindle.cact` with no gain,
+so use it with the skip on.
+
 ## Costs at a glance
 
 | Change | Size | Decode speed |
@@ -221,6 +264,7 @@ memory access is less regular.
 | Runtime LoRA | +4 MB | 3-7% slower |
 | 1024-token window | KV cache ×4 (8-bit) | longer prompts cost a bit more |
 | Tool-prefix cache | one copy of the cached state | prefill of the tool list skipped on repeat requests |
+| Decode skip (off by default; `spindle-fast.cact` with `--decode-skip`) | none | 1.39x faster per generated token, about -1.6 points |
 | Span loss, loss weights | none | none |
 
 ## References

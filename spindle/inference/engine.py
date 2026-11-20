@@ -9,6 +9,8 @@ from pathlib import Path
 
 import numpy as np
 
+from spindle.archive import parse_layers
+
 ABI_VERSION = 1
 _LIBRARY_NAME = {'win32': 'spindle.dll', 'darwin': 'libspindle.dylib'}.get(sys.platform, 'libspindle.so')
 
@@ -28,7 +30,7 @@ def find_library(library=None):
 class Engine:
     """One model in memory with one cached request (KV cache). Not thread-safe across requests."""
 
-    def __init__(self, model, *, library=None, threads=0, window=0):
+    def __init__(self, model, *, library=None, threads=0, window=0, decode_skip=None):
         self.model = Path(model).resolve(strict=True)
         self.library = find_library(library)
         if os.name == 'nt':
@@ -54,6 +56,8 @@ class Engine:
         lib.np_set_prefix.restype = i
         lib.np_prefix_reused.argtypes = [p]
         lib.np_prefix_reused.restype = z
+        lib.np_set_decode_skip.argtypes = [p, ctypes.c_uint64, p, z]
+        lib.np_set_decode_skip.restype = i
         self._lock = threading.RLock()
         error = ctypes.create_string_buffer(2048)
         self._handle = lib.np_load(os.fsencode(self.model), 0, 0, threads, error, len(error))
@@ -64,8 +68,13 @@ class Engine:
             self.geometry = struct.unpack('<48If', handle.read(196))
         self.vocab = self.geometry[6] or self.geometry[5]
         self.context = self.geometry[13]
+        trained = self.geometry[45] | self.geometry[46] << 32
+        # The layers this model was trained to skip at decode (header fields 45-46; empty for most models).
+        self.skip_layers = tuple(i for i in range(self.geometry[10]) if trained >> i & 1)
         if window:
             self.set_window(window)
+        if decode_skip:
+            self.set_decode_skip(decode_skip)
 
     def _check(self, status, error):
         if status < 0:
@@ -91,11 +100,24 @@ class Engine:
             self._check(self._lib.np_set_window(self._handle, window, error, len(error)), error)
 
     def set_prefix(self, count):
-        """Keep the state after the first `count` prompt tokens (whole prefill chunks only).
-        A later prompt that starts with the same tokens skips their prefill; results do not change."""
+        """Keep the state after the first `count` prompt tokens. A later prompt that starts with the
+        same tokens skips their prefill; results do not depend on whether the cache was hit."""
         with self._lock:
             error = ctypes.create_string_buffer(2048)
             self._check(self._lib.np_set_prefix(self._handle, count, error, len(error)), error)
+
+    def set_decode_skip(self, layers):
+        """Decode skip: generated tokens skip these layers; prompt tokens always run every layer.
+        Off by default. `True` uses the model's own list (`skip_layers`), a list or '5-8,10' names the
+        layers, and None/False/() turns it off. Lists the model was not trained with cost accuracy."""
+        if layers is True:
+            layers = self.skip_layers
+        elif isinstance(layers, str):
+            layers = parse_layers(layers)
+        mask = sum(1 << int(layer) for layer in set(layers or ()))
+        with self._lock:
+            error = ctypes.create_string_buffer(2048)
+            self._check(self._lib.np_set_decode_skip(self._handle, mask, error, len(error)), error)
 
     def prefix_reused(self):
         """Prompt tokens the last prefill took from the prefix cache."""

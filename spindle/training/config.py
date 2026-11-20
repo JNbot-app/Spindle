@@ -21,6 +21,7 @@ class TrainConfig:
     span_weight: float = 0.5      # 0 turns span attention supervision off
     teacher: str = ''             # reasoning .cact whose call / no-call choice is distilled (see decision.py)
     distill_weight: float = 0.    # weight of that decision term (0: off)
+    skip_layers: str = ''         # decode skip: layers answer tokens skip, e.g. '5-8,10' ('' = the parent's, 'none' = off)
     argument_weight: float = 4.0
     no_call_weight: float = 20.0
     tool_variety: float = 0.5     # chance that a call row gets a varied tool list (see tool_lists.py)

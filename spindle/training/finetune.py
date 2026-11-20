@@ -7,7 +7,9 @@ What trains:
   * the runtime LoRA on the attention projections at `lora_lr` (continued when the parent
     model already has one),
 with an optional span attention loss (see spans.py) and an optional decision term, where a frozen
-reasoning `teacher` teaches the call / no-call choice (see decision.py). Training rows get varied tool lists and
+reasoning `teacher` teaches the call / no-call choice (see decision.py). With decode skip (`skip_layers`, or the
+parent's own list), answer tokens skip those layers in training as the engine does at decode, so the model
+learns to work without them; the list is saved in the exported archive. Training rows get varied tool lists and
 tool-absent copies first (see tool_lists.py); validation rows stay as they are.
 
 Training runs in rounds of `updates_per_round` updates. Each round tokenizes only its own part
@@ -91,13 +93,15 @@ def make_loss(model_config, codebook, pad_id, span_weight, distill_weight=0., de
         params = runtime_lora.apply(quantize.cq4_ste(trainable['model'], codebook), trainable['lora'])
         tokens = batch['tokens']
         mask = attention_mask(tokens, model_config.kv_window, pad_id)
+        answer = (batch['weights'] > 0).astype(jnp.float32)      # decode skip applies to answer tokens
         span_total = 0.
         if with_spans and span_weight:
             span = (batch['span_query'], batch['span_start'], batch['span_end'])
-            logits, state = model.apply({'params': params}, tokens, mask, span=span, mutable=['intermediates'])
+            logits, state = model.apply({'params': params}, tokens, mask, span=span, answer=answer,
+                                        mutable=['intermediates'])
             span_total = sum(jnp.sum(v) for v in jax.tree.leaves(state['intermediates'])) / len(spans.SPAN_LAYERS)
         else:
-            logits = model.apply({'params': params}, tokens, mask)
+            logits = model.apply({'params': params}, tokens, mask, answer=answer)
         losses = optax.softmax_cross_entropy_with_integer_labels(logits[:, :-1], tokens[:, 1:])
         weights = batch['weights'][:, 1:]
         total = jnp.sum(losses * weights) + span_weight * span_total
@@ -187,6 +191,12 @@ def finetune(parent, train_path, output, *, validation_path=None, config=TrainCo
     print(f'  {model_config.num_layers} layers, width {model_config.d_model}, '
           f'{"Monarch" if model_config.monarch else "Kronecker"} Hadamard factors, '
           f'KV window {model_config.kv_window}', flush=True)
+    if config.skip_layers:
+        model_config.skip_layers = () if config.skip_layers == 'none' else archive.parse_layers(config.skip_layers)
+        if model_config.num_layers - 1 in model_config.skip_layers:
+            raise ValueError('the last layer is the read-out layer and cannot be skipped')
+    if model_config.skip_layers:
+        print(f'  decode skip: answer tokens skip layers {list(model_config.skip_layers)}', flush=True)
 
     print('Reading data', flush=True)
     rows = data.read_rows(train_path)

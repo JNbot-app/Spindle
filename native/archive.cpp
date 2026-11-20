@@ -243,8 +243,10 @@ void Model::validate_decoder() {
         !vd || qd > 256 || vd > 256 || nh * uint64_t(qd) > 32768 || nh * uint64_t(vd) > 32768 ||
         !h[13] || h[13] > 65536 || hn < d || hn > 4096 || (hn & (hn - 1)) || !n || n > 8 || !h[3] ||
         h[3] > h[13] || h[4] != 8 || !h[5] || h[5] > 65536 || h[6] > h[5] || h[19] > 16 ||
-        h[26] > 4 || h[31] > 16 || !std::isfinite(theta) || theta <= 0)
+        h[26] > 4 || h[31] > 13 || !std::isfinite(theta) || theta <= 0)
         throw std::invalid_argument("Unsupported decoder geometry");
+    if ((uint64_t(h[46]) << 32 | h[45]) >> (l - 1)) // fields 45-46: layers decode tokens skip
+        throw std::invalid_argument("The decode skip mask must keep the last layer");
     auto expect = [&](uint32_t i, std::initializer_list<uint32_t> shape, bool matrix = false) {
         const Tensor &t = tensor(int32_t(i));
         if (t.ndim != shape.size() || !std::equal(shape.begin(), shape.end(), t.shape.begin()) ||

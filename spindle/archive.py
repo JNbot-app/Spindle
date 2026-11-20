@@ -1,7 +1,8 @@
 """Read and write .cact model archives (NumPy only, no JAX).
 
 Layout (all little-endian):
-  * header: 48 u32 fields and the RoPE theta (f32) - the full model geometry,
+  * header: 48 u32 fields and the RoPE theta (f32) - the full model geometry; fields 45-46 hold
+    the decode skip mask (layers that decode tokens skip, bit i = layer i),
   * the CQ codebooks (f32): 2-bit (4) | 3-bit (8) | 4-bit (16) values, unit-group scaled,
   * a directory of 44-byte records: dtype, ndim, shape[4], offset, nbytes, group, bits
     (dtype 1 = FP16, 2 = FP32, 3 = CQ, 4 = RAW),
@@ -26,6 +27,15 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+
+
+def parse_layers(text):
+    """'5-8,10' -> (5, 6, 7, 8, 10)."""
+    layers = set()
+    for part in filter(None, str(text).split(',')):
+        first, _, last = part.partition('-')
+        layers.update(range(int(first), int(last or first) + 1))
+    return tuple(sorted(layers))
 
 TAG = 0x05E12A84
 HEADER = struct.Struct('<48If')
@@ -162,7 +172,10 @@ def model_config(header):
         raise ValueError('Unsupported engram geometry')
     if h[14] != 1 << (h[7] - 1).bit_length():
         raise ValueError('Unsupported Hadamard width')
+    if h[31] > 13:
+        raise ValueError('At most 13 engram sites (header fields 45-46 hold the decode skip mask)')
     global_mask = h[17] | h[18] << 32
+    skip_mask = h[45] | h[46] << 32
     return ModelConfig(
         vocab_size=h[5], out_vocab=h[6], d_model=h[7], num_heads=h[8], num_kv_heads=h[9],
         num_layers=h[10], qk_head_dim=h[11], v_head_dim=h[12], max_seq_len=h[13],
@@ -170,7 +183,8 @@ def model_config(header):
         global_layers=tuple(i for i in range(h[10]) if global_mask >> i & 1),
         qkv_conv_taps=h[19], engram_slots=h[20], engram_sub_dim=h[21], engram_orders=orders,
         engram_heads=h[22] // len(orders), engram_seed_heads=h[25],
-        engram_layers=tuple(h[32:32 + h[31]]), rope_theta=h[48], kv_window=h[3], kv_bits=h[4])
+        engram_layers=tuple(h[32:32 + h[31]]), rope_theta=h[48],
+        skip_layers=tuple(i for i in range(h[10]) if skip_mask >> i & 1), kv_window=h[3], kv_bits=h[4])
 
 
 def _layer_names(taps):
@@ -296,6 +310,8 @@ def save(parent, params, config, output, runtime_lora=None):
             if kind != record[0] or tuple(shape) != tuple(record[3:3 + record[1]]) or len(blob) != record[8]:
                 raise ValueError(f'Tensor {index} does not match the parent archive layout')
             raw[record[7]:record[7] + record[8]] = blob
+    mask = sum(1 << i for i in config.skip_layers)
+    struct.pack_into('<II', raw, 45 * 4, mask & 0xFFFFFFFF, mask >> 32)
     raw = strip_lora(bytes(raw))
     if runtime_lora is not None:
         raw = write_lora(raw, runtime_lora)

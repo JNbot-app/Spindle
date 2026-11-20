@@ -608,7 +608,17 @@ void History::convolve(const float *raw, float *out, size_t pos, const Tensor &t
     }
 }
 KV::KV(size_t w, size_t h, size_t q, size_t value)
-    : window(w), heads(h), qdim(q), vdim(value), k(w * h * q), v(w * h * value), ks(w * h), vs(w * h) {}
+    : window(w), heads(h), qdim(q), vdim(value), k(w * h * q), v(w * h * value), ks(w * h), vs(w * h),
+      skipped(w) {}
+void KV::skip(size_t pos) {
+    uint8_t &mark = skipped[pos % window];
+    skips += !mark;
+    mark = 1;
+}
+void KV::clear_skips() {
+    std::fill(skipped.begin(), skipped.end(), uint8_t(0));
+    skips = 0;
+}
 // Recovers the integer codes of an A8-quantized vector: its largest magnitude is 127 codes.
 static float a8_codes(const float *x, size_t n, int8_t *codes) {
     float maximum = 0;
@@ -708,6 +718,9 @@ void KV::attend(size_t head, const float *queries, size_t group, size_t first, s
         ProfileTimer timer(PHASE_ATTN_SOFTMAX);
         for (size_t g = 0; g < group; ++g) {
             float *p = scores + g * count;
+            if (skips)
+                for (size_t j = 0; j < count; ++j)
+                    if (skipped[slot_of(j)]) p[j] = -INFINITY;
             softmax(p, count);
             for (size_t j = 0; j < count; ++j) p[j] *= vs[slot_of(j) * heads + head];
         }
@@ -775,6 +788,10 @@ void KV::attend(size_t head, const float *queries, size_t group, size_t first, s
 }
 void KV::put(size_t pos, const float *key, const float *value) {
     size_t slot = pos % window;
+    if (skipped[slot]) {
+        skipped[slot] = 0;
+        --skips;
+    }
     for (size_t h = 0; h < heads; ++h) {
         auto quant = [&](const float *x, size_t width, int8_t *codes, float &scale) {
             float maximum = 0;
