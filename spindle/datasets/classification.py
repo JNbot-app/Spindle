@@ -2,7 +2,8 @@
 every intent is a tool without arguments (task 'tools', or 'no_call' when no listed intent fits).
 
 Tool names, field names, label words and label order vary from row to row, so the answer can
-only come from reading the schema.
+only come from reading the schema. Intent sets (Banking77, CLINC150) also give long enum lists of
+similar labels (up to 20), so the model learns to pick among many close choices.
 """
 import json
 import random
@@ -21,6 +22,17 @@ def _row(query, tools, answers, task, source):
 def _label_names(path, column):
     features = json.loads(pq.read_schema(path).metadata[b'huggingface'])['info']['features']
     return features[column]['names']
+
+
+def _long_enum_rows(examples, names, source, tool_names, field_names, description, seed, most=16):
+    """examples: (text, label index). The right label among 3 to `most - 1` other labels of the set."""
+    rng = random.Random(seed)
+    for text, label in examples:
+        shown = [names[label], *rng.sample([n for n in names if n != names[label]], rng.randint(3, most - 1))]
+        rng.shuffle(shown)
+        name, field = rng.choice(tool_names), rng.choice(field_names)
+        parameters = {'type': 'object', 'properties': {field: {'type': 'string', 'enum': shown}}, 'required': [field]}
+        yield _row(text, [tool(name, description, parameters)], [call(name, {field: names[label]})], 'classify', source)
 
 
 def _enum_rows(examples, source, tool_names, field_names, descriptions, label_sets, seed, extra_labels=()):
@@ -133,16 +145,23 @@ def banking(limit=8000):
     random.Random(16).shuffle(rows)
     half = min(limit, len(rows)) // 2
     yield from _routing(rows[:half], names, 'banking77', 16)
-    # The other half as an enum: the right label among a handful of others.
-    rng = random.Random(17)
-    for text, label in rows[half:2 * half]:
-        shown = [names[label], *rng.sample([n for n in names if n != names[label]], rng.randint(3, 8))]
-        rng.shuffle(shown)
-        name, field = rng.choice(['classify_request', 'route_ticket', 'tag_question']), rng.choice(['intent', 'topic', 'label'])
-        parameters = {'type': 'object', 'properties': {field: {'type': 'string', 'enum': shown}}, 'required': [field]}
-        yield _row(text, [tool(name, 'Pick what a bank customer is asking about.', parameters)],
-                   [call(name, {field: names[label]})], 'classify', 'banking77')
+    # The other half as an enum: the right label among up to 15 others.
+    yield from _long_enum_rows(rows[half:2 * half], names, 'banking77', ['classify_request', 'route_ticket', 'tag_question'],
+                               ['intent', 'topic', 'label'], 'Pick what a bank customer is asking about.', 17)
+
+
+def clinc_labels(limit=8000):
+    """CLINC150 as an enum: the right intent (in words) among up to 19 others."""
+    path = hub.hf_file('clinc/clinc_oos', 'plus/train-00000-of-00001.parquet')
+    all_names = _label_names(path, 'intent')
+    index = {i: k for k, i in enumerate(i for i, n in enumerate(all_names) if n != 'oos')}  # out-of-scope is no label
+    names = [n.replace('_', ' ') for n in all_names if n != 'oos']
+    rows = [(r['text'], index[r['intent']]) for r in hub.read_parquet(path) if r['intent'] in index]
+    random.Random(18).shuffle(rows)
+    yield from _long_enum_rows(rows[:limit], names, 'clinc_labels',
+                               ['detect_intent', 'classify_request', 'route_message', 'intent'],
+                               ['intent', 'request_type', 'category', 'label'], 'What the user is asking for.', 18, most=20)
 
 
 SOURCES = {'sst2': sst2, 'tweet_sentiment': tweet_sentiment, 'emotion': emotion, 'ag_news': ag_news,
-           'clinc': clinc, 'banking77': banking}
+           'clinc': clinc, 'banking77': banking, 'clinc_labels': clinc_labels}

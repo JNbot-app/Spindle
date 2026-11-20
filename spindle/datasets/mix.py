@@ -25,7 +25,8 @@ SHARES = {
     'tools': {'xlam': 0.46, 'toolace': 0.18, 'glaive': 0.18, 'dates': 0.08, 'clinc': 0.07, 'banking77': 0.03},
     'no_call': {'when2call': 0.40, 'glaive': 0.25, 'clinc': 0.20, 'toolace': 0.10, 'banking77': 0.05},
     'extract': {'massive': 0.25, 'few_nerd': 0.25, 'records': 0.25, 'pile_ner': 0.17, 'atis': 0.08},
-    'classify': {'sst2': 0.30, 'tweet_sentiment': 0.30, 'banking77': 0.15, 'ag_news': 0.13, 'emotion': 0.12},
+    'classify': {'sst2': 0.25, 'tweet_sentiment': 0.25, 'banking77': 0.15, 'ag_news': 0.13, 'emotion': 0.12,
+                 'clinc_labels': 0.10},
 }
 
 
