@@ -10,6 +10,7 @@ import numpy as np
 
 from spindle.prompt import THINK_END, THINK_START, render_prompt, render_tools
 from spindle.tokenizer import Tokenizer
+from .debias import EnumDebias
 from .engine import Engine
 from .filters import filter_calls
 from .grammar import IncrementalSampler, expand_refs
@@ -152,6 +153,8 @@ class Spindle:
     `window` sets the attention window in tokens (0: the model's own, 1024 for the base model).
     `decode_skip` lets generated tokens skip some layers for faster decoding (off by default; see
     Engine.set_decode_skip): True uses the layers the model was trained to skip.
+    `debias_enums` corrects the model's pull towards some labels of long enum lists, learned from
+    earlier requests (off by default; see debias.py: it assumes labels come up about equally often).
     `threads` is the size of the worker team (0: half the performance cores, at most four). The
     tool part of the prompt is cached, so requests with the same tools skip most of its prefill.
 
@@ -164,11 +167,12 @@ class Spindle:
     """
 
     def __init__(self, model, tools=None, *, system='', library=None, threads=0, filters=True,
-                 min_call_probability=0.0, window=0, reasoning=True, decode_skip=None):
+                 min_call_probability=0.0, window=0, reasoning=True, decode_skip=None, debias_enums=False):
         self.engine = Engine(model, library=library, threads=threads, window=window, decode_skip=decode_skip)
         self.tokenizer = Tokenizer.from_archive(model)
         self.filters = filters
         self.reasoning = reasoning
+        self.debias = EnumDebias(self.tokenizer) if debias_enums else None
         self._think_id = self.tokenizer.p2id.get(THINK_START)
         self.min_call_probability = min_call_probability
         self._lock = threading.RLock()
@@ -228,7 +232,9 @@ class Spindle:
                              and logits[self._think_id] > logits[sampler.open_id])
                     token = self._think_id if think else sampler.open_id
                 else:
-                    token = sampler.select_token(logits)
+                    token = self.debias and self.debias.select(sampler, logits)
+                    if token is None:
+                        token = sampler.select_token(logits)
                 if sampler.mode == 'json' and token != sampler.close_id:
                     value = constrained_log_probability(logits, token, sampler)
                     for index in tracker.feed(sampler.pieces[token]):
