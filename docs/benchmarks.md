@@ -14,13 +14,13 @@ rules. Nothing here is used for training: the training mix (`spindle build-data`
 | BFCL v4 | AST | 53.0 | 40.5 | **73.0** |
 | When2Call | acc. | **70.0** | 64.5 | 68.0 |
 | Tool removed | acc. | 53.5 | 38.0 | **65.5** |
-| DSTC8 | F1 | 43.4 | 36.2 | **44.8** |
+| DSTC8 | F1 | 42.8 | 36.2 | **44.8** |
 | SNIPS | F1 | 23.8 | 16.5 | **30.5** |
 | SNIPS 7-way | F1 | 21.1 | 11.7 | **26.8** |
-| Rotten Tomatoes | acc. | **66.5** | 48.5 | 15.5 |
-| DBpedia | acc. | 28.0 | 31.0 | **79.5** |
-| **Mean** | | 47.9 | 41.3 | **54.1** |
-| Time per request (M1) | | 0.47 s | 0.38 s | 9.36 s |
+| Rotten Tomatoes | acc. | **65.0** | 48.5 | 15.5 |
+| DBpedia | acc. | 46.5 | 31.0 | **79.5** |
+| **Mean** | | 49.5 | 41.3 | **54.1** |
+| Time per request (M1) | | 0.48 s | 0.38 s | 9.36 s |
 | File size | | 75 MB | 35 MB | 1.1 GB |
 
 <p align="center"><img src="images/size.svg" alt="Mean score against model size" width="760"></p>
@@ -30,8 +30,8 @@ Notes on these runs:
 - LFM3-1.7B wrote text until the 512-token answer limit on most Rotten Tomatoes reviews instead of calling
   the tool, even though the request asked for a call (`tool_choice: required`). Its 15.5 there reflects that,
   not its sense of sentiment. It also makes its time per request higher.
-- Spindle's enum debiasing is off in these runs. Turned on (`--debias-enums`), DBpedia goes from 28.0 to
-  46.5 (mean 49.5); the other sets stay within 1.5 points.
+- Spindle's enum debiasing is on in these runs (the default). Turned off (`--no-debias-enums`), DBpedia drops
+  from 46.5 to 28.0 (mean 47.9); the other sets stay within 1.5 points.
 - The per-set summaries, including call and decline rates, are in
   [`benchmarks/results/`](../benchmarks/results).
 
@@ -61,7 +61,7 @@ seed 0), greedy decoding.
 
 | Model | File | Runtime | Settings |
 | --- | --- | --- | --- |
-| Spindle | `spindle.cact`, 4-bit | This repository's engine | Window 1024, output filters and copy guard on, enum debiasing off (the defaults) |
+| Spindle | `spindle.cact`, 4-bit | This repository's engine | Window 1024, output filters, copy guard and enum debiasing on (the defaults) |
 | Needle 3 | The shipped 2-bit `needle3.cact` | The official Cactus engine | Its defaults |
 | LFM3-1.7B | `LFM3-1.7B-Q4_K_M.gguf` | llama.cpp `llama-server` (b11960) | Chat template with tools, thinking off, 4 threads |
 

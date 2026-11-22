@@ -14,7 +14,7 @@ in three places: the MLP block, how the model is fine-tuned, and the engine that
 | Attention window | 256 tokens in the file header | 1024 tokens by default, set at run time (`window`) |
 | Output | Reasoning, then calls | Calls, with an optional reasoning note |
 | Confidence | Learned confidence head | Probability of each call, measured during decoding |
-| Decoding | Grammar-constrained | Same, plus a copy guard (on) and enum debiasing (opt-in) |
+| Decoding | Grammar-constrained | Same, plus a copy guard and enum debiasing (both on) |
 | Engine | Cactus prebuilt engines | Own C++ CPU engine that reads the new tensors |
 
 The numbers below come from development experiments on earlier checkpoints, each against a matched control.
@@ -291,11 +291,11 @@ Two small decoding rules, applied token by token after the grammar:
   the request is taken instead, if the model finds it almost as likely (within 4 in log probability). Ending
   the string is never blocked, and values that are not in the request (dates, codes) are left alone. It
   raised Mobile Actions from 76 to 82 with no change elsewhere. `copy_margin=0` turns it off.
-- **Enum debiasing** (opt-in, `debias_enums=True`, `--debias-enums`). With many labels (a 14-way topic
+- **Enum debiasing** (on, `debias_enums=False` / `--no-debias-enums` turns it off). With many labels (a 14-way topic
   list), a small model favours a few of them for almost any input. This option records the model's label
   probabilities over earlier requests with the same field and labels, and after 8 requests picks by
   p(label) / mean p(label). It needs no labels, but it assumes the labels come up about equally often over
-  time, so it is off by default. On DBpedia it raised the score from 25.5 to 43.5.
+  time; when one label is much more common in your use, turn it off. On DBpedia it raises the score from 28.0 to 46.5.
 
 ## Costs at a glance
 

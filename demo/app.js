@@ -17,17 +17,30 @@ function setStatus(text, { progress = null, state = '' } = {}) {
   if (progress !== null) $('status-fill').style.transform = `scaleX(${progress})`;
 }
 
+// The cached model is kept until the file on the server changes (a new release under the same name).
+const VERSION_HEADER = 'x-model-version';
+const version = (response) => response.headers.get('etag') || response.headers.get('last-modified') || '';
+
+/** True when the server has a different model file than the cached copy; false when offline or unknown. */
+async function changedSince(url, cached) {
+  try {
+    const response = await fetch(url, { method: 'HEAD', cache: 'no-store' });
+    const current = response.ok ? version(response) : '';
+    return Boolean(current) && current !== cached.headers.get(VERSION_HEADER);
+  } catch { return false; }
+}
+
 async function fetchModel() {
   let cache = null;
   try { cache = await caches.open(CACHE_NAME); } catch { /* private mode: no cache */ }
   for (const url of MODEL_URLS) {
     const cached = cache && await cache.match(url);
-    if (cached) { setStatus('Loading model…'); return cached.arrayBuffer(); }
+    if (cached && !await changedSince(url, cached)) { setStatus('Loading model…'); return cached.arrayBuffer(); }
   }
   let lastError = null;
   for (const url of MODEL_URLS) {
     try {
-      const response = await fetch(url);
+      const response = await fetch(url, { cache: 'no-cache' });
       if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
       const total = Number(response.headers.get('content-length')) || 0;
       const chunks = []; let received = 0;
@@ -43,7 +56,10 @@ async function fetchModel() {
       const bytes = new Uint8Array(received);
       let offset = 0;
       for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
-      if (cache) cache.put(url, new Response(bytes, { headers: { 'content-type': 'application/octet-stream' } })).catch(() => {});
+      if (cache) {
+        const headers = { 'content-type': 'application/octet-stream', [VERSION_HEADER]: version(response) };
+        cache.put(url, new Response(bytes, { headers })).catch(() => {});
+      }
       return bytes.buffer;
     } catch (error) { lastError = error; }
   }

@@ -35,13 +35,13 @@ architecture and changes how the model is fine-tuned and run: [what changed, and
 | BFCL v4 | AST | 53.0 | 40.5 | **73.0** |
 | When2Call | acc. | **70.0** | 64.5 | 68.0 |
 | Tool removed | acc. | 53.5 | 38.0 | **65.5** |
-| DSTC8 | F1 | 43.4 | 36.2 | **44.8** |
+| DSTC8 | F1 | 42.8 | 36.2 | **44.8** |
 | SNIPS | F1 | 23.8 | 16.5 | **30.5** |
 | SNIPS 7-way | F1 | 21.1 | 11.7 | **26.8** |
-| Rotten Tomatoes | acc. | **66.5** | 48.5 | 15.5 |
-| DBpedia | acc. | 28.0 | 31.0 | **79.5** |
-| **Mean** | | 47.9 | 41.3 | **54.1** |
-| Time per request (M1) | | 0.47 s | 0.38 s | 9.36 s |
+| Rotten Tomatoes | acc. | **65.0** | 48.5 | 15.5 |
+| DBpedia | acc. | 46.5 | 31.0 | **79.5** |
+| **Mean** | | 49.5 | 41.3 | **54.1** |
+| Time per request (M1) | | 0.48 s | 0.38 s | 9.36 s |
 | File size | | 75 MB | 35 MB | 1.1 GB |
 
 200 cases per set, same cases and scoring for every model, on one Apple M1 laptop. Needle 3 runs on its own
@@ -49,9 +49,9 @@ official engine with its shipped file; LFM3-1.7B runs in llama.cpp with thinking
 [How each set is scored](docs/benchmarks.md).
 
 - **Against Needle 3**, the model it starts from, Spindle is better at declining when no tool fits
-  (When2Call, Tool removed), at picking from larger tool lists (BFCL), at extraction and at sentiment,
-  and level on Mobile Actions. It is behind on DroidCall, mostly because it declines some requests that
-  Needle 3 calls, and slightly on topic classification (DBpedia).
+  (When2Call, Tool removed), at picking from larger tool lists (BFCL), at extraction and at classification
+  (Rotten Tomatoes, DBpedia), and level on Mobile Actions. It is behind on DroidCall, mostly because it
+  declines some requests that Needle 3 calls.
 - **LFM3-1.7B**, a general model 15 times larger, scores higher on most sets, but takes about 20 times
   longer per request on the same laptop. Spindle is ahead on When2Call and Rotten Tomatoes (where LFM3 mostly
   wrote text instead of calling the tool).
@@ -95,8 +95,9 @@ spindle run models/spindle.cact --tools examples/tools.json "Set a timer for 10 
 
 The tool part of the prompt is cached, so repeated requests with the same tools only process the new text.
 Values copied from the request are kept word for word (the copy guard, `copy_margin=4`; `0` turns it off).
-For closed label lists with many labels, `debias_enums=True` corrects the model's pull towards a few labels,
-learned from earlier requests; it assumes the labels come up about equally often, so it is off by default.
+For closed label lists with many labels, enum debiasing (on by default) corrects the model's pull towards a few
+labels, learned from earlier requests. It assumes the labels come up about equally often over time; if one label
+is much more common in your use, turn it off with `debias_enums=False`.
 
 A system prompt with the current date (`Spindle(..., system="Current date and time: 2025-06-02T09:30")`)
 lets the model resolve "tomorrow at noon" and "next Tuesday".

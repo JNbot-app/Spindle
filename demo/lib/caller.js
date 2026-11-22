@@ -1,6 +1,7 @@
 // Tool calling: prompt, grammar-constrained greedy decoding, result (port of spindle/inference/caller.py).
 import { IncrementalSampler, expandRefs, topK } from './grammar.js';
 import { copyGuard } from './copying.js';
+import { EnumDebias } from './debias.js';
 import { filterCalls } from './filters.js';
 
 const IM_START = '<|im_start|>', IM_END = '<|im_end|>';
@@ -155,12 +156,13 @@ class CallTracker {
  * eval(tokens) -> Float32Array logits, reset(), setPrefix(n), prefixReused(), confidence(), context.
  */
 export class Spindle {
-  constructor(engine, tokenizer, { filters = true, minCallProbability = 0, copyMargin = 4 } = {}) {
+  constructor(engine, tokenizer, { filters = true, minCallProbability = 0, copyMargin = 4, debiasEnums = true } = {}) {
     this.engine = engine;
     this.tokenizer = tokenizer;
     this.filters = filters;
     this.minCallProbability = minCallProbability;
     this.copyMargin = copyMargin; // keep values copied from the request word for word (0: off), see copying.js
+    this.debias = debiasEnums ? new EnumDebias(tokenizer) : null; // learns label priors over requests, see debias.js
     this.setTools([]);
   }
 
@@ -196,7 +198,7 @@ export class Spindle {
     const prefill = (performance.now() - started) / 1000;
     const generated = [], queryBytes = new TextEncoder().encode(query);
     for (let step = 0; step < maxNewTokens; step++) {
-      let token = step === 0 ? sampler.openId : sampler.selectToken(logits);
+      let token = step === 0 ? sampler.openId : (this.debias?.select(sampler, logits) ?? sampler.selectToken(logits));
       if (step > 0 && this.copyMargin) token = copyGuard(sampler, logits, token, queryBytes, this.copyMargin);
       if (sampler.mode === 'json' && token !== sampler.closeId) {
         const value = constrainedLogProbability(logits, token, sampler);

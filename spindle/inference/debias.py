@@ -11,7 +11,7 @@ any input. This option learns that pull from the requests themselves, without la
 
 This assumes the labels come up about equally often over time. When some labels are much more
 common (an on/off switch that is nearly always "on", say), it pushes towards the rare ones, so it
-is off by default (`Spindle(debias_enums=True)`, `spindle bench --debias-enums`).
+is on by default and can be turned off (`Spindle(debias_enums=False)`, `--no-debias-enums`).
 """
 import numpy as np
 

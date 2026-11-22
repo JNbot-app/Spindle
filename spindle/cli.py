@@ -10,7 +10,8 @@ def _run(args):
         tools = json.load(handle)
     with Spindle(args.model, tools, system=args.system, library=args.library, threads=args.threads,
                  filters=not args.no_filters, min_call_probability=args.min_call_probability,
-                 window=args.window, decode_skip=args.decode_skip) as model:
+                 window=args.window, decode_skip=args.decode_skip,
+                 debias_enums=not args.no_debias_enums) as model:
         queries = args.query or []
         if not queries:
             print('Type a request (Ctrl-D to quit).')
@@ -46,7 +47,7 @@ def _bench(args):
     else:
         backend = run.SpindleBackend(args.model, window=args.window, filters=not args.no_filters,
                                      reasoning=not args.no_reasoning, library=args.library, threads=args.threads,
-                                     decode_skip=args.decode_skip, debias_enums=args.debias_enums,
+                                     decode_skip=args.decode_skip, debias_enums=not args.no_debias_enums,
                                      copy_margin=args.copy_margin)
     try:
         run.run(backend, names, limit=args.limit or (run.QUICK if args.quick else 0), output=args.output,
@@ -93,6 +94,8 @@ def main(argv=None):
     run.add_argument('--window', type=int, default=0,
                      help="Attention window in tokens (0: the model's own)")
     run.add_argument('--decode-skip', nargs='?', const=True, metavar='LAYERS', help=DECODE_SKIP_HELP)
+    run.add_argument('--no-debias-enums', action='store_true',
+                     help='Turn off the correction of the pull towards some labels of enum lists')
     run.add_argument('--threads', type=int, default=0, help='Worker threads (0: automatic)')
     run.add_argument('--library', help='Path to the native engine library (default: build/native)')
     run.add_argument('--metrics', action='store_true', help='Also print token counts and timing')
@@ -122,8 +125,8 @@ def main(argv=None):
     bench.add_argument('--no-filters', action='store_true', help='Score the raw decoded calls')
     bench.add_argument('--no-reasoning', action='store_true', help='Never let the model write a note before its calls')
     bench.add_argument('--decode-skip', nargs='?', const=True, metavar='LAYERS', help=DECODE_SKIP_HELP)
-    bench.add_argument('--debias-enums', action='store_true',
-                       help='Correct the pull towards some labels of enum lists, learned from earlier cases')
+    bench.add_argument('--no-debias-enums', action='store_true',
+                       help='Turn off the correction of the pull towards some labels of enum lists')
     bench.add_argument('--copy-margin', type=float, default=4.0,
                        help='Keep values copied from the request word for word (log-prob margin, 0: off; default 4)')
     bench.add_argument('--threads', type=int, default=0, help='Worker threads (0: automatic)')

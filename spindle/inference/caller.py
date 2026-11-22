@@ -156,7 +156,7 @@ class Spindle:
     `decode_skip` lets generated tokens skip some layers for faster decoding (off by default; see
     Engine.set_decode_skip): True uses the layers the model was trained to skip.
     `debias_enums` corrects the model's pull towards some labels of long enum lists, learned from
-    earlier requests (off by default; see debias.py: it assumes labels come up about equally often).
+    earlier requests (on by default, False: off; see debias.py: it assumes labels come up about equally often).
     `copy_margin` (default 4, 0: off) keeps a value that is being copied from the request word for word when the
     model would reword it halfway and the copy is at most this much less likely (see copying.py).
     `threads` is the size of the worker team (0: half the performance cores, at most four). The
@@ -171,7 +171,7 @@ class Spindle:
     """
 
     def __init__(self, model, tools=None, *, system='', library=None, threads=0, filters=True,
-                 min_call_probability=0.0, window=0, reasoning=True, decode_skip=None, debias_enums=False,
+                 min_call_probability=0.0, window=0, reasoning=True, decode_skip=None, debias_enums=True,
                  copy_margin=4.0):
         self.engine = Engine(model, library=library, threads=threads, window=window, decode_skip=decode_skip)
         self.tokenizer = Tokenizer.from_archive(model)
