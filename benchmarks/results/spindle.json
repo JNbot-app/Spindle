@@ -10,7 +10,7 @@
       "decline_rate_when_not": null,
       "groups": {},
       "errors": 0,
-      "seconds_per_case": 0.851
+      "seconds_per_case": 0.822
     },
     "droidcall": {
       "score": 33.5,
@@ -20,7 +20,7 @@
       "decline_rate_when_not": null,
       "groups": {},
       "errors": 0,
-      "seconds_per_case": 0.418
+      "seconds_per_case": 0.406
     },
     "bfcl": {
       "score": 53.0,
@@ -75,7 +75,7 @@
         }
       },
       "errors": 2,
-      "seconds_per_case": 0.797
+      "seconds_per_case": 0.735
     },
     "when2call": {
       "score": 70.0,
@@ -98,7 +98,7 @@
         }
       },
       "errors": 0,
-      "seconds_per_case": 1.003
+      "seconds_per_case": 0.927
     },
     "tool_removed": {
       "score": 53.5,
@@ -108,10 +108,10 @@
       "decline_rate_when_not": 53.5,
       "groups": {},
       "errors": 0,
-      "seconds_per_case": 0.561
+      "seconds_per_case": 0.549
     },
     "dstc8": {
-      "score": 42.8,
+      "score": 43.4,
       "metric": "field F1",
       "cases": 200,
       "call_rate_when_needed": 100.0,
@@ -166,7 +166,7 @@
           "cases": 3
         },
         "RentalCars_3": {
-          "score": 12.3,
+          "score": 14.5,
           "cases": 27
         },
         "Restaurants_2": {
@@ -199,7 +199,7 @@
         }
       },
       "errors": 0,
-      "seconds_per_case": 0.429
+      "seconds_per_case": 0.445
     },
     "snips_gold": {
       "score": 23.8,
@@ -209,7 +209,7 @@
       "decline_rate_when_not": null,
       "groups": {},
       "errors": 0,
-      "seconds_per_case": 0.288
+      "seconds_per_case": 0.286
     },
     "snips_7way": {
       "score": 21.1,
@@ -219,7 +219,7 @@
       "decline_rate_when_not": null,
       "groups": {},
       "errors": 0,
-      "seconds_per_case": 0.218
+      "seconds_per_case": 0.208
     },
     "rotten_tomatoes": {
       "score": 65.0,
@@ -229,7 +229,7 @@
       "decline_rate_when_not": null,
       "groups": {},
       "errors": 0,
-      "seconds_per_case": 0.111
+      "seconds_per_case": 0.113
     },
     "dbpedia": {
       "score": 46.5,
@@ -239,7 +239,7 @@
       "decline_rate_when_not": null,
       "groups": {},
       "errors": 0,
-      "seconds_per_case": 0.157
+      "seconds_per_case": 0.158
     }
   },
   "name": "Spindle",

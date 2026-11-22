@@ -1,7 +1,5 @@
-// Tool calling: prompt, grammar-constrained greedy decoding, result (port of spindle/inference/caller.py).
-import { IncrementalSampler, expandRefs, topK } from './grammar.js';
-import { copyGuard } from './copying.js';
-import { EnumDebias } from './debias.js';
+// Tool calling: prompt, decoding, result (port of spindle/inference/caller.py). The token choice itself
+// (grammar, copy guard, enum debiasing) runs in the engine (native/grammar.cpp), the same code Python uses.
 import { filterCalls } from './filters.js';
 
 const IM_START = '<|im_start|>', IM_END = '<|im_end|>';
@@ -103,66 +101,57 @@ function restore(value, aliases) {
   return value;
 }
 
-const logSumExp = (values, indices) => {
-  let max = -Infinity;
-  for (const i of indices) if (values[i] > max) max = values[i];
-  let sum = 0;
-  for (const i of indices) sum += Math.exp(values[i] - max);
-  return max + Math.log(sum);
-};
-
-/** log p(token) renormalised over the grammar-valid tokens among the top k candidates. */
-function constrainedLogProbability(logits, token, sampler, topCount = 32, window = 12) {
-  const all = { [Symbol.iterator]: function* () { for (let i = 0; i < logits.length; i++) yield i; } };
-  const full = logits[token] - logSumExp(logits, all);
-  if (full > -1e-4) return full;
-  let close = [];
-  for (let i = 0; i < logits.length; i++) if (logits[i] >= logits[token] - window) close.push(i);
-  if (close.length > topCount) {
-    close = topK(Float32Array.from(close, (i) => logits[i]), topCount).map((i) => close[i]);
+/** Inline local "$ref" pointers (non-recursive schemas only). */
+export function expandRefs(value, root = value, seen = []) {
+  if (Array.isArray(value)) return value.map((v) => expandRefs(v, root, seen));
+  if (value === null || typeof value !== 'object') return value;
+  if ('$ref' in value) {
+    const ref = value.$ref;
+    if (typeof ref !== 'string' || !ref.startsWith('#/') || seen.includes(ref)) {
+      throw new Error('Only non-recursive local JSON schema references are supported');
+    }
+    let target = root;
+    for (const part of ref.slice(2).split('/')) target = target?.[part.replaceAll('~1', '/').replaceAll('~0', '~')];
+    if (target === undefined) throw new Error('Unresolved local schema reference');
+    const rest = Object.fromEntries(Object.entries(value).filter(([k]) => k !== '$ref'));
+    return { allOf: [expandRefs(target, root, [...seen, ref]), expandRefs(rest, root, seen)] };
   }
-  const allowed = new Set(close.filter((t) => sampler.transition(t) !== null));
-  allowed.add(token);
-  return logits[token] - logSumExp(logits, allowed);
+  return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, expandRefs(v, root, seen)]));
 }
 
-/** Maps generated JSON bytes to the index of the call they belong to. */
-class CallTracker {
-  constructor() { this.depth = 0; this.inString = false; this.escape = false; this.call = -1; }
-  feed(bytes) {
-    const touched = new Set();
-    for (const byte of bytes) {
-      if (this.inString) {
-        if (this.escape) this.escape = false;
-        else if (byte === 0x5c) this.escape = true;
-        else if (byte === 0x22) this.inString = false;
-      } else if (byte === 0x22) this.inString = true;
-      else if (byte === 0x7b || byte === 0x5b) {
-        this.depth++;
-        if (byte === 0x7b && this.depth === 2) this.call++;
-      } else if (byte === 0x7d || byte === 0x5d) {
-        if (this.depth >= 2) touched.add(this.call);
-        this.depth--;
-        continue;
-      }
-      if (this.depth >= 2) touched.add(this.call);
+/** Every string in an `enum` or `const` of a schema (the labels enum debiasing may correct). */
+function enumLabels(schema, found = new Set()) {
+  if (Array.isArray(schema)) for (const item of schema) enumLabels(item, found);
+  else if (schema !== null && typeof schema === 'object') {
+    for (const [key, value] of Object.entries(schema)) {
+      if (key === 'enum' && Array.isArray(value)) for (const v of value) { if (typeof v === 'string') found.add(v); }
+      else if (key === 'const' && typeof value === 'string') found.add(value);
+      else enumLabels(value, found);
     }
-    return touched;
   }
+  return found;
 }
 
 /**
  * A tool-calling model. `engine` is a synchronous object with
- * eval(tokens) -> Float32Array logits, reset(), setPrefix(n), prefixReused(), confidence(), context.
+ * feed(tokens), reset(), setPrefix(n), prefixReused(), confidence(), context and createDecoder(vocabulary).
  */
 export class Spindle {
-  constructor(engine, tokenizer, { filters = true, minCallProbability = 0, copyMargin = 4, debiasEnums = true } = {}) {
+  constructor(engine, tokenizer, { filters = true, minCallProbability = 0, copyMargin = 4, debiasEnums = true, reasoning = true } = {}) {
     this.engine = engine;
     this.tokenizer = tokenizer;
     this.filters = filters;
     this.minCallProbability = minCallProbability;
-    this.copyMargin = copyMargin; // keep values copied from the request word for word (0: off), see copying.js
-    this.debias = debiasEnums ? new EnumDebias(tokenizer) : null; // learns label priors over requests, see debias.js
+    this.copyMargin = copyMargin; // keep values copied from the request word for word (0: off)
+    this.debiasEnums = debiasEnums; // correct the pull towards some labels of enum lists, learned over requests
+    this.reasoning = reasoning; // let a model that prefers it write a short note before its calls
+    this.pieces = tokenizer.pieceBytes();
+    const stop = [tokenizer.eosId, tokenizer.p2id.get(IM_END)].filter((id) => id !== undefined);
+    this.decoder = engine.createDecoder({
+      pieces: this.pieces, special: Uint8Array.from(this.pieces, (_, i) => (tokenizer.isSpecial(i) ? 1 : 0)),
+      openId: tokenizer.p2id.get('<tool_call>'), closeId: tokenizer.p2id.get('</tool_call>'),
+      thinkId: tokenizer.p2id.get('<think>') ?? -1, stopIds: stop,
+    });
     this.setTools([]);
   }
 
@@ -181,51 +170,42 @@ export class Spindle {
       shown.push(visible);
       aliases[name] = [entry.name, propertyAliases];
     }
-    new IncrementalSampler(normalized, this.tokenizer); // validate the schemas now, not mid-request
+    const labels = {};
+    for (const label of enumLabels(normalized)) if (label) labels[label] = this.tokenizer.encode(label)[0];
+    this.decoder.setTools(normalized.map(({ name, parameters }) => ({ name, parameters })), labels);
     const prefix = 1 + this.tokenizer.encode(renderTools(shown, system)).length;
     this.tools = normalized; this.promptTools = shown; this.aliases = aliases; this.system = system.trim();
     this.engine.setPrefix(prefix);
   }
 
-  run(query, { maxNewTokens = 256, onToken = null } = {}) {
+  run(query, { maxNewTokens = 256, onToken = null, requireCall = false } = {}) {
     const started = performance.now();
     const ids = [this.tokenizer.bosId, ...this.tokenizer.encode(renderPrompt(this.promptTools, query, this.system))];
     if (ids.length + maxNewTokens > this.engine.context) throw new Error('The input is too long for this model (try a shorter text)');
-    const sampler = new IncrementalSampler(this.tools, this.tokenizer);
-    const tracker = new CallTracker(), logProbs = new Map();
+    this.decoder.start(query, { requireCall: requireCall && this.tools.length > 0, reasoning: this.reasoning,
+      debias: this.debiasEnums, copyMargin: this.copyMargin });
     this.engine.reset();
-    let logits = this.engine.eval(ids);
+    this.engine.feed(ids);
     const prefill = (performance.now() - started) / 1000;
-    const generated = [], queryBytes = new TextEncoder().encode(query);
+    const generated = [];
     for (let step = 0; step < maxNewTokens; step++) {
-      let token = step === 0 ? sampler.openId : (this.debias?.select(sampler, logits) ?? sampler.selectToken(logits));
-      if (step > 0 && this.copyMargin) token = copyGuard(sampler, logits, token, queryBytes, this.copyMargin);
-      if (sampler.mode === 'json' && token !== sampler.closeId) {
-        const value = constrainedLogProbability(logits, token, sampler);
-        for (const index of tracker.feed(sampler.pieces[token])) {
-          if (!logProbs.has(index)) logProbs.set(index, []);
-          logProbs.get(index).push(value);
-        }
-      }
-      sampler.advance(token);
-      generated.push(token);
+      generated.push(this.decoder.step());
       if (onToken) onToken(generated.length);
-      if (sampler.mode === 'done') break;
-      logits = this.engine.eval([token]);
+      if (this.decoder.done) break;
+      this.engine.feed(generated.slice(-1));
     }
-    const complete = sampler.mode === 'done';
-    const calls = complete ? sampler.json.value : [];
-    const probabilities = calls.map((_, i) => {
-      const values = logProbs.get(i) ?? [0];
-      return Math.exp(values.reduce((a, b) => a + b, 0) / values.length);
-    });
+    const { calls, probabilities, complete } = this.decoder.result();
+    const openId = this.tokenizer.p2id.get('<tool_call>');
+    const noteTokens = generated.indexOf(openId, 1) > 0 ? generated.slice(1, generated.indexOf(openId, 1)) : [];
+    const bytes = noteTokens.flatMap((t) => [...this.pieces[t]]);
+    const reasoning = new TextDecoder().decode(Uint8Array.from(bytes)).replace('</think>', '').trim();
     const { kept, suppressed, reasons } = this.filters
       ? filterCalls(calls, this.tools, query, { system: this.system, callProbabilities: probabilities, minCallProbability: this.minCallProbability })
       : { kept: calls, suppressed: [], reasons: [] };
     const total = (performance.now() - started) / 1000;
     return {
       functionCalls: this.restoreCalls(kept), suppressedCalls: this.restoreCalls(suppressed), suppressedReasons: reasons,
-      callProbabilities: probabilities, confidence: this.engine.confidence(), complete,
+      callProbabilities: probabilities, confidence: this.engine.confidence(), complete, reasoning,
       metrics: { promptTokens: ids.length, cachedPromptTokens: this.engine.prefixReused(), generatedTokens: generated.length,
         prefillSeconds: prefill, totalSeconds: total },
     };
@@ -234,7 +214,7 @@ export class Spindle {
   /** Read the tool part of the prompt ahead of time so the next request starts faster. */
   warm() {
     this.engine.reset();
-    this.engine.eval([this.tokenizer.bosId, ...this.tokenizer.encode(renderPrompt(this.promptTools, 'hi', this.system))]);
+    this.engine.feed([this.tokenizer.bosId, ...this.tokenizer.encode(renderPrompt(this.promptTools, 'hi', this.system))]);
   }
 
   restoreCalls(calls) {

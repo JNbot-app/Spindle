@@ -6,6 +6,9 @@
 
 **A 75 MB tool-calling model that runs on a phone CPU or in a browser tab.**
 
+**[▶ Try the demo in your browser](https://jnbot-app.github.io/Spindle/)**: it downloads the model once and runs it
+on your device. No server, no sign-up, and nothing you type leaves the page.
+
 Give Spindle the tools your app exposes (as JSON Schema) and what the user said. It picks the right tools
 and fills in their arguments, or says that none of them fits. The same model also extracts fields from text
 and classifies it, because both are just a tool call with the right schema.
@@ -35,13 +38,13 @@ architecture and changes how the model is fine-tuned and run: [what changed, and
 | BFCL v4 | AST | 53.0 | 40.5 | **73.0** |
 | When2Call | acc. | **70.0** | 64.5 | 68.0 |
 | Tool removed | acc. | 53.5 | 38.0 | **65.5** |
-| DSTC8 | F1 | 42.8 | 36.2 | **44.8** |
+| DSTC8 | F1 | 43.4 | 36.2 | **44.8** |
 | SNIPS | F1 | 23.8 | 16.5 | **30.5** |
 | SNIPS 7-way | F1 | 21.1 | 11.7 | **26.8** |
 | Rotten Tomatoes | acc. | **65.0** | 48.5 | 15.5 |
 | DBpedia | acc. | 46.5 | 31.0 | **79.5** |
-| **Mean** | | 49.5 | 41.3 | **54.1** |
-| Time per request (M1) | | 0.48 s | 0.38 s | 9.36 s |
+| **Mean** | | 49.6 | 41.3 | **54.1** |
+| Time per request (M1) | | 0.46 s | 0.38 s | 9.36 s |
 | File size | | 75 MB | 35 MB | 1.1 GB |
 
 200 cases per set, same cases and scoring for every model, on one Apple M1 laptop. Needle 3 runs on its own
@@ -127,9 +130,11 @@ with Spindle("models/spindle.cact", sentiment) as model:
 
 ## Try it in the browser
 
-The engine also compiles to WebAssembly. [`demo/`](demo/) is a static page with tool calling, extraction,
-sentiment and search-filter examples and a visual tool editor. It runs entirely in the page and is published
-to GitHub Pages by [`.github/workflows/demo.yml`](.github/workflows/demo.yml). To run it locally:
+**[Open the live demo](https://jnbot-app.github.io/Spindle/)**. The engine also compiles to WebAssembly, and
+[`demo/`](demo/) is a static page with tool calling, extraction, sentiment and search-filter examples and a visual
+tool editor. It runs entirely in the page, with the same decoding code as Python. It is published to GitHub Pages by
+[`.github/workflows/demo.yml`](.github/workflows/demo.yml), with the model from the latest release (publish a
+new release first, then push or run the workflow, to update the demo's model). To run it locally:
 
 ```sh
 python3 -m http.server 8000     # from the repository root, with models/spindle.cact in place
@@ -219,13 +224,13 @@ commercial use.
 
 | Path | What it holds |
 | --- | --- |
-| [`spindle/inference/`](spindle/inference) | Engine binding, grammar-constrained decoding, output checks, the `Spindle` class |
+| [`spindle/inference/`](spindle/inference) | Engine binding, output checks, the `Spindle` class |
 | [`spindle/model/`](spindle/model) | The network in JAX/Flax, 4-bit fake quantization, runtime LoRA |
 | [`spindle/training/`](spindle/training) | Data preparation, span attention supervision, the fine-tuning loop |
 | [`spindle/bench/`](spindle/bench) | Benchmark sets, scoring, and the runner behind `spindle bench` |
 | [`spindle/datasets/`](spindle/datasets) | Converters for public datasets and the general training mix |
 | [`spindle/archive.py`](spindle/archive.py) | Reading and writing `.cact` model files |
-| [`native/`](native) | The C++ engine (NEON, AVX2, SSE2 and WebAssembly SIMD kernels) |
+| [`native/`](native) | The C++ engine (NEON, AVX2, SSE2 and WebAssembly SIMD kernels) and the decoder (`grammar.cpp`: grammar, copy guard, enum debiasing), shared by Python and the demo |
 | [`demo/`](demo) | The browser demo |
 | [`benchmarks/`](benchmarks) | Benchmark results and the script that draws the charts |
 

@@ -14,13 +14,13 @@ rules. Nothing here is used for training: the training mix (`spindle build-data`
 | BFCL v4 | AST | 53.0 | 40.5 | **73.0** |
 | When2Call | acc. | **70.0** | 64.5 | 68.0 |
 | Tool removed | acc. | 53.5 | 38.0 | **65.5** |
-| DSTC8 | F1 | 42.8 | 36.2 | **44.8** |
+| DSTC8 | F1 | 43.4 | 36.2 | **44.8** |
 | SNIPS | F1 | 23.8 | 16.5 | **30.5** |
 | SNIPS 7-way | F1 | 21.1 | 11.7 | **26.8** |
 | Rotten Tomatoes | acc. | **65.0** | 48.5 | 15.5 |
 | DBpedia | acc. | 46.5 | 31.0 | **79.5** |
-| **Mean** | | 49.5 | 41.3 | **54.1** |
-| Time per request (M1) | | 0.48 s | 0.38 s | 9.36 s |
+| **Mean** | | 49.6 | 41.3 | **54.1** |
+| Time per request (M1) | | 0.46 s | 0.38 s | 9.36 s |
 | File size | | 75 MB | 35 MB | 1.1 GB |
 
 <p align="center"><img src="images/size.svg" alt="Mean score against model size" width="760"></p>

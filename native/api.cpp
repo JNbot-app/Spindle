@@ -41,7 +41,7 @@ void tokens_valid(np_handle *h, const int32_t *tokens, size_t count, size_t posi
 }
 size_t vocab(np_handle *h) { return h->model->h[6] ? h->model->h[6] : h->model->h[5]; }
 } // namespace
-uint32_t np_abi_version() { return 1; }
+uint32_t np_abi_version() { return 2; }
 np_handle *np_load(const char *path, uint64_t offset, uint64_t length, int32_t threads, char *error,
                    size_t capacity) {
     try {

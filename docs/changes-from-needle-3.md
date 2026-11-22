@@ -283,7 +283,8 @@ In a matched pair of runs (both from Needle 3), the joined rows raised the tool-
 
 ## 11. Copy guard and enum debiasing
 
-Two small decoding rules, applied token by token after the grammar:
+Two small decoding rules, applied token by token after the grammar. Both live with the grammar in the C++
+decoder (`native/grammar.cpp`), so Python and the browser demo decode the same way:
 
 - **Copy guard** (on, `copy_margin=4`). A small model often starts copying a phrase from the request and
   rewords it halfway ("Café Grano de Oro at 25 Calle del Prado" → "... Oro 25 Calle del Prado"). When the

@@ -1,5 +1,6 @@
 """ctypes binding to the native engine (native/, built as libspindle)."""
 import ctypes
+import json
 import os
 import struct
 import sys
@@ -11,7 +12,7 @@ import numpy as np
 
 from spindle.archive import parse_layers
 
-ABI_VERSION = 1
+ABI_VERSION = 2
 _LIBRARY_NAME = {'win32': 'spindle.dll', 'darwin': 'libspindle.dylib'}.get(sys.platform, 'libspindle.so')
 
 
@@ -27,6 +28,36 @@ def find_library(library=None):
     raise FileNotFoundError('Native engine not found: build native/ (see README) or set SPINDLE_LIBRARY')
 
 
+def load_library(path):
+    """The native library with its argument types set (one copy per path)."""
+    if path in _LIBRARIES:
+        return _LIBRARIES[path]
+    lib = ctypes.CDLL(str(path))
+    p, i, z = ctypes.c_void_p, ctypes.c_int32, ctypes.c_size_t
+    lib.np_abi_version.restype = ctypes.c_uint32
+    if lib.np_abi_version() != ABI_VERSION:
+        raise RuntimeError('The native engine and this Python package are out of date with each other (rebuild native/)')
+    lib.np_decoder_new.argtypes = [p, p, p, z, i, i, i, p, z, p, z]
+    lib.np_decoder_new.restype = p
+    lib.np_decoder_free.argtypes = [p]
+    lib.np_decoder_free.restype = None
+    lib.np_decoder_set_tools.argtypes = [p, ctypes.c_char_p, ctypes.c_char_p, p, z]
+    lib.np_decoder_set_tools.restype = i
+    lib.np_decoder_start.argtypes = [p, ctypes.c_char_p, z, i, ctypes.c_float, p, z]
+    lib.np_decoder_start.restype = i
+    lib.np_decoder_step.argtypes = [p, p, z, p, z]
+    lib.np_decoder_step.restype = i
+    lib.np_decoder_state.argtypes = [p]
+    lib.np_decoder_state.restype = i
+    lib.np_decoder_result.argtypes = [p, p, z]
+    lib.np_decoder_result.restype = ctypes.c_int64
+    _LIBRARIES[path] = lib
+    return lib
+
+
+_LIBRARIES = {}
+
+
 class Engine:
     """One model in memory with one cached request (KV cache). Not thread-safe across requests."""
 
@@ -35,11 +66,8 @@ class Engine:
         self.library = find_library(library)
         if os.name == 'nt':
             self._dll_directory = os.add_dll_directory(str(self.library.parent))
-        lib = self._lib = ctypes.CDLL(str(self.library))
+        lib = self._lib = load_library(self.library)
         p, i, z = ctypes.c_void_p, ctypes.c_int32, ctypes.c_size_t
-        lib.np_abi_version.restype = ctypes.c_uint32
-        if lib.np_abi_version() != ABI_VERSION:
-            raise RuntimeError('The native engine and this Python package are out of date with each other')
         lib.np_load.argtypes = [ctypes.c_char_p, ctypes.c_uint64, ctypes.c_uint64, i, p, z]
         lib.np_load.restype = p
         lib.np_eval.argtypes = [p, p, z, p, z, p, z]
@@ -146,3 +174,66 @@ class Engine:
 
     def __exit__(self, *_):
         self.close()
+
+
+class Decoder:
+    """Token choice for tool calling, in the native library (native/grammar.cpp): only tokens that keep
+    the answer a valid list of tool calls, plus the copy guard and enum debiasing. Python and the browser
+    demo share this code. Enum debiasing learns across requests, so keep one decoder per model."""
+
+    REQUIRE_CALL, REASONING, DEBIAS = 1, 2, 4
+    DONE = 3
+
+    def __init__(self, library, pieces, special, open_id, close_id, think_id, stop_ids):
+        self._lib = load_library(find_library(library))
+        blob = b''.join(pieces)
+        offsets = np.zeros(len(pieces) + 1, np.uint32)
+        offsets[1:] = np.cumsum([len(piece) for piece in pieces])
+        flags = np.asarray(special, np.uint8)
+        stops = np.asarray(sorted(stop_ids), np.int32)
+        error = ctypes.create_string_buffer(2048)
+        self._handle = self._lib.np_decoder_new(blob, offsets.ctypes.data, flags.ctypes.data, len(pieces), open_id,
+                                                close_id, -1 if think_id is None else think_id, stops.ctypes.data,
+                                                len(stops), error, len(error))
+        if not self._handle:
+            raise RuntimeError(error.value.decode('utf-8', 'replace'))
+        self._finalizer = weakref.finalize(self, self._lib.np_decoder_free, self._handle)
+
+    def _check(self, status, error):
+        if status < 0:
+            raise RuntimeError(error.value.decode('utf-8', 'replace'))
+        return status
+
+    def set_tools(self, tools, label_tokens):
+        """`tools`: [{name, parameters}] with local $refs inlined; `label_tokens`: {enum label: first token}."""
+        error = ctypes.create_string_buffer(2048)
+        self._check(self._lib.np_decoder_set_tools(self._handle, json.dumps(tools).encode(),
+                                                   json.dumps(label_tokens).encode(), error, len(error)), error)
+
+    def start(self, query, *, require_call=False, reasoning=True, debias=True, copy_margin=4.0):
+        data = query.encode('utf-8')
+        flags = self.REQUIRE_CALL * bool(require_call) | self.REASONING * bool(reasoning) | self.DEBIAS * bool(debias)
+        error = ctypes.create_string_buffer(2048)
+        self._check(self._lib.np_decoder_start(self._handle, data, len(data), flags, copy_margin, error, len(error)), error)
+
+    def step(self, logits):
+        """Pick, record and take the next token for these logits; returns it."""
+        logits = np.ascontiguousarray(logits, dtype=np.float32)
+        error = ctypes.create_string_buffer(2048)
+        return self._check(self._lib.np_decoder_step(self._handle, logits.ctypes.data, logits.size, error, len(error)), error)
+
+    @property
+    def done(self):
+        return self._lib.np_decoder_state(self._handle) == self.DONE
+
+    def result(self):
+        """{"complete": bool, "calls": [...], "probabilities": [...]}"""
+        size = self._lib.np_decoder_result(self._handle, None, 0)
+        buffer = ctypes.create_string_buffer(size + 1)
+        self._lib.np_decoder_result(self._handle, buffer, len(buffer))
+        return json.loads(buffer.value.decode('utf-8'))
+
+    def close(self):
+        if self._handle:
+            self._finalizer()
+            self._handle = None

@@ -82,6 +82,31 @@ NP_API int32_t np_last_hidden(np_handle *, float *, size_t, char *, size_t);
 // Returns 1 with a score, 0 when no head is present, or -1 on error.
 NP_API int32_t np_confidence(np_handle *, float *, char *, size_t);
 
+// Token choice for tool calling (grammar.cpp): grammar-constrained greedy decoding, copy guard and
+// enum debiasing, shared by every frontend. Create one decoder per model with its vocabulary (the bytes
+// of every token, `offsets` has count + 1 entries; special = 1 for control/unknown tokens), give it the
+// tools (a JSON list of {name, parameters} with local $refs inlined, plus a JSON object mapping each
+// enum label to its first token), then per request: start, and step with each new logits vector until
+// the state is NP_DECODER_DONE. np_decoder_result writes {"complete", "calls", "probabilities"} as JSON
+// and returns its length. Enum debiasing learns across requests, so keep one decoder per model.
+typedef struct np_decoder np_decoder;
+#define NP_DECODER_REQUIRE_CALL 1
+#define NP_DECODER_REASONING 2
+#define NP_DECODER_DEBIAS 4
+#define NP_DECODER_DONE 3
+NP_API np_decoder *np_decoder_new(const uint8_t *pieces, const uint32_t *offsets, const uint8_t *special,
+                                  size_t count, int32_t open_id, int32_t close_id, int32_t think_id,
+                                  const int32_t *stop_ids, size_t stop_count, char *, size_t);
+NP_API void np_decoder_free(np_decoder *);
+NP_API int32_t np_decoder_set_tools(np_decoder *, const char *tools_json, const char *labels_json,
+                                    char *, size_t);
+NP_API int32_t np_decoder_start(np_decoder *, const char *query, size_t query_size, int32_t flags,
+                                float copy_margin, char *, size_t);
+// Picks, records and takes the next token; returns it, or -1 on error.
+NP_API int32_t np_decoder_step(np_decoder *, const float *logits, size_t count, char *, size_t);
+// 0 before the calls (or in a note), 1 in the calls, 2 after them, 3 done.
+NP_API int32_t np_decoder_state(np_decoder *);
+NP_API int64_t np_decoder_result(np_decoder *, char *buffer, size_t size);
 #ifdef __cplusplus
 }
 #endif

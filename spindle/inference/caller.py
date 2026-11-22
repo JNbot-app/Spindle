@@ -1,20 +1,16 @@
 """Tool calling with the native engine: prompt, grammar-constrained greedy decoding, result."""
 import copy
 import json
-import math
 import re
 import threading
 import time
 
-import numpy as np
+from jsonschema import Draft202012Validator
 
 from spindle.prompt import THINK_END, THINK_START, render_prompt, render_tools
 from spindle.tokenizer import Tokenizer
-from . import copying
-from .debias import EnumDebias
-from .engine import Engine
+from .engine import Decoder, Engine
 from .filters import filter_calls
-from .grammar import IncrementalSampler, expand_refs
 
 
 def snake(name):
@@ -91,50 +87,49 @@ def restore(value, aliases):
     return value
 
 
-def constrained_log_probability(logits, token, sampler, top_k=32, window=12.0):
-    """log p(token) renormalised over the grammar-valid tokens among the top k candidates."""
-    values = np.asarray(logits, dtype=np.float64)
-    top = values.max()
-    full = float(values[token] - top - np.log(np.exp(values - top).sum()))
-    if full > -1e-4:
-        return full
-    close = np.flatnonzero(values >= values[token] - window)
-    if len(close) > top_k:
-        close = close[np.argpartition(-values[close], top_k - 1)[:top_k]]
-    allowed = {int(t) for t in close if sampler.transition(int(t)) is not None} | {token}
-    return float(values[token] - np.logaddexp.reduce(values[sorted(allowed)]))
+def expand_refs(value, root=None, seen=()):
+    """Inline local "$ref" pointers (non-recursive schemas only)."""
+    root = value if root is None else root
+    if isinstance(value, list):
+        return [expand_refs(v, root, seen) for v in value]
+    if not isinstance(value, dict):
+        return value
+    if '$ref' in value:
+        ref = value['$ref']
+        if not isinstance(ref, str) or not ref.startswith('#/') or ref in seen:
+            raise ValueError('Only non-recursive local JSON schema references are supported')
+        target = root
+        try:
+            for part in ref[2:].split('/'):
+                target = target[part.replace('~1', '/').replace('~0', '~')]
+        except (KeyError, TypeError) as error:
+            raise ValueError('Unresolved local schema reference') from error
+        return {'allOf': [expand_refs(target, root, (*seen, ref)),
+                          expand_refs({k: v for k, v in value.items() if k != '$ref'}, root, seen)]}
+    return {key: expand_refs(item, root, seen) for key, item in value.items()}
 
 
-class _CallTracker:
-    """Maps generated JSON bytes to the index of the call they belong to."""
+def enum_labels(schema, found=None):
+    """Every string in an `enum` or `const` of a schema (the labels enum debiasing may correct)."""
+    found = set() if found is None else found
+    if isinstance(schema, list):
+        for item in schema:
+            enum_labels(item, found)
+    elif isinstance(schema, dict):
+        for key, value in schema.items():
+            if key == 'enum' and isinstance(value, list):
+                found.update(v for v in value if isinstance(v, str))
+            elif key == 'const' and isinstance(value, str):
+                found.add(value)
+            else:
+                enum_labels(value, found)
+    return found
 
-    def __init__(self):
-        self.depth, self.in_string, self.escape, self.call = 0, False, False, -1
 
-    def feed(self, data):
-        touched = set()
-        for byte in data:
-            if self.in_string:
-                if self.escape:
-                    self.escape = False
-                elif byte == 0x5c:
-                    self.escape = True
-                elif byte == 0x22:
-                    self.in_string = False
-            elif byte == 0x22:
-                self.in_string = True
-            elif byte in b'{[':
-                self.depth += 1
-                if byte == 0x7b and self.depth == 2:
-                    self.call += 1
-            elif byte in b'}]':
-                if self.depth >= 2:
-                    touched.add(self.call)
-                self.depth -= 1
-                continue
-            if self.depth >= 2:
-                touched.add(self.call)
-        return touched
+def token_bytes(tokenizer):
+    """The bytes each token stands for."""
+    return [bytes([int(p[3:5], 16)]) if kind == 4 else p.replace('\u2581', ' ').encode('utf-8')
+            for p, kind in zip(tokenizer.pieces, tokenizer.types)]
 
 
 class Spindle:
@@ -156,9 +151,10 @@ class Spindle:
     `decode_skip` lets generated tokens skip some layers for faster decoding (off by default; see
     Engine.set_decode_skip): True uses the layers the model was trained to skip.
     `debias_enums` corrects the model's pull towards some labels of long enum lists, learned from
-    earlier requests (on by default, False: off; see debias.py: it assumes labels come up about equally often).
+    earlier requests (on by default, False: off; it assumes labels come up about equally often).
     `copy_margin` (default 4, 0: off) keeps a value that is being copied from the request word for word when the
-    model would reword it halfway and the copy is at most this much less likely (see copying.py).
+    model would reword it halfway and the copy is at most this much less likely.
+    Token choice (grammar, copy guard, debiasing) runs in the native library (native/grammar.cpp).
     `threads` is the size of the worker team (0: half the performance cores, at most four). The
     tool part of the prompt is cached, so requests with the same tools skip most of its prefill.
 
@@ -177,9 +173,12 @@ class Spindle:
         self.tokenizer = Tokenizer.from_archive(model)
         self.filters = filters
         self.reasoning = reasoning
-        self.debias = EnumDebias(self.tokenizer) if debias_enums else None
+        self.debias_enums = debias_enums
         self.copy_margin = copy_margin
-        self._think_id = self.tokenizer.p2id.get(THINK_START)
+        tokenizer = self.tokenizer
+        self.decoder = Decoder(self.engine.library, token_bytes(tokenizer), [t in (1, 2) for t in tokenizer.types],
+                               tokenizer.p2id['<tool_call>'], tokenizer.p2id['</tool_call>'], tokenizer.p2id.get(THINK_START),
+                               {tokenizer.eos_id, tokenizer.p2id['<|im_end|>']})
         self.min_call_probability = min_call_probability
         self._lock = threading.RLock()
         self._tools_key = None
@@ -207,9 +206,12 @@ class Spindle:
             if 'parameters' in entry:
                 visible['parameters'] = normalize_schema(entry['parameters'])[0]
             shown.append(visible)
-        IncrementalSampler(normalized, self.tokenizer)  # validate the schemas now, not mid-request
+        for tool in normalized:  # check the schemas now, not mid-request
+            Draft202012Validator.check_schema(tool['parameters'])
+        labels = {label: self.tokenizer.encode(label)[0] for label in enum_labels(normalized) if label}
         prefix = 1 + len(self.tokenizer.encode(render_tools(shown, system)))
         with self._lock:
+            self.decoder.set_tools([{'name': t['name'], 'parameters': t['parameters']} for t in normalized], labels)
             self.tools, self.prompt_tools, self.aliases, self.system = normalized, shown, aliases, system.strip()
             self._tools_key = key
             self.engine.set_prefix(prefix)
@@ -225,39 +227,22 @@ class Spindle:
             ids = [self.tokenizer.bos_id] + self.tokenizer.encode(prompt)
             if len(ids) + max_new_tokens > self.engine.context:
                 raise ValueError('Prompt plus generation budget exceeds the context length')
-            sampler = IncrementalSampler(self.tools, self.tokenizer, require_call and bool(self.tools),
-                                         check=False)  # set_tools validated the schemas
-            tracker, log_probs = _CallTracker(), {}
+            self.decoder.start(query, require_call=require_call and bool(self.tools), reasoning=self.reasoning,
+                               debias=self.debias_enums, copy_margin=self.copy_margin)
             self.engine.reset()
             logits = self.engine.eval(ids)
             prefill = time.perf_counter() - started
             generated = []
-            for step in range(max_new_tokens):
-                if step == 0:  # the answer starts with a note (when the model prefers one) or the calls
-                    think = (self.reasoning and self._think_id is not None
-                             and logits[self._think_id] > logits[sampler.open_id])
-                    token = self._think_id if think else sampler.open_id
-                else:
-                    token = self.debias and self.debias.select(sampler, logits)
-                    if token is None:
-                        token = sampler.select_token(logits)
-                    if self.copy_margin:
-                        token = copying.guard(sampler, logits, token, query.encode('utf-8'), self.copy_margin)
-                if sampler.mode == 'json' and token != sampler.close_id:
-                    value = constrained_log_probability(logits, token, sampler)
-                    for index in tracker.feed(sampler.pieces[token]):
-                        log_probs.setdefault(index, []).append(value)
-                sampler.advance(token)
-                generated.append(token)
-                if sampler.mode == 'done':
+            for _ in range(max_new_tokens):
+                generated.append(self.decoder.step(logits))
+                if self.decoder.done:
                     break
-                logits = self.engine.eval([token])
-            complete = sampler.mode == 'done'
-            note = generated[1:generated.index(sampler.open_id)] if sampler.open_id in generated[1:] else []
+                logits = self.engine.eval(generated[-1:])
+            answer = self.decoder.result()
+            open_id = self.tokenizer.p2id['<tool_call>']
+            note = generated[1:generated.index(open_id)] if open_id in generated[1:] else []
             note = self.tokenizer.decode(note).replace(THINK_END, '').strip()
-            calls = sampler.json.value if complete else []
-            probabilities = [math.exp(sum(v) / len(v)) for v in
-                             (log_probs.get(i, [0.0]) for i in range(len(calls)))]
+            calls, probabilities, complete = answer['calls'], answer['probabilities'], answer['complete']
             if self.filters:
                 kept, suppressed, reasons = filter_calls(
                     calls, self.tools, query, system=self.system, call_probabilities=probabilities,
@@ -281,6 +266,7 @@ class Spindle:
         return result
 
     def close(self):
+        self.decoder.close()
         self.engine.close()
 
     def __enter__(self):
