@@ -39,6 +39,23 @@ const travel = [
   tool('get_exchange_rate', 'Get the exchange rate between two currencies.', { from: str('Currency code, e.g. EUR'), to: str('Currency code, e.g. USD') }, ['from', 'to']),
 ];
 
+const strings = (description) => ({ type: 'array', items: { type: 'string' }, description });
+
+const work = [
+  tool('send_email', 'Send an email.', { to: str('Recipient name or address'), subject: str('Subject line'), body: str('Email text') }, ['to', 'subject']),
+  tool('send_message', 'Send a chat message to a colleague.', { contact: str('Name of the colleague'), text: str('Message text') }, ['contact', 'text']),
+  tool('create_event', 'Add a meeting or event to the calendar.',
+    { title: str('Event title'), date: str('Date'), time: str('Start time'), attendees: strings('People to invite') }, ['title', 'date']),
+  tool('create_reminder', 'Create a personal reminder.', { text: str('What to be reminded of'), time: str('When to remind') }, ['text']),
+  tool('search_files', 'Search documents by keywords.',
+    { query: str('Keywords'), file_type: str('File type', { enum: ['pdf', 'doc', 'sheet', 'slides'] }) }, ['query']),
+  tool('translate_text', 'Translate text into another language.', { text: str('Text to translate'), target_language: str('Language to translate into') }, ['text', 'target_language']),
+  tool('convert_currency', 'Convert an amount between currencies.', { amount: num('Amount'), from: str('Currency code, e.g. EUR'), to: str('Currency code, e.g. USD') }, ['amount', 'from', 'to']),
+  tool('calculate_tip', 'Split a bill and add a tip.', { total: num('Bill total'), people: int('Number of people'), tip_percent: num('Tip in percent') }, ['total']),
+  tool('set_status', 'Set your chat status.',
+    { status: str('', { enum: ['available', 'busy', 'away', 'do_not_disturb'] }), message: str('Optional status text') }, ['status']),
+];
+
 // ---------------------------------------------------------------- extraction
 const record = (name, description, properties, required = []) => [tool(name, description, properties, required)];
 
@@ -114,19 +131,35 @@ export const TASKS = [
         e('Temperature', 'Set the heating to 21 degrees celsius'),
         e('Timer', 'Start a 15 minute timer called laundry'),
         e('Unlock', 'Unlock the back door'),
+        e('Three actions', 'Turn off the lights in the kitchen and the hallway, then lock the front door'),
+        e('Indirect', "It's way too cold in here, put the heating on 23"),
       ] },
       { name: 'Phone assistant', tools: phone, examples: [
         e('Message', 'Text Anna that I will be ten minutes late'),
         e('Alarm', 'Set an alarm for 7:30 called gym'),
-        e('Weather', "What's the weather like in Berlin?"),
+        e('Weather', 'Do I need an umbrella in Paris today?'),
         e('Reminder', 'Remind me to buy milk tomorrow at 9am'),
         e('Call', 'Call my brother Tom'),
+        e('Wake up', 'Wake me up at 6:15 tomorrow for the airport'),
+        e('Two people', 'Ring my sister Eva and text Jonas that dinner is at 8'),
+        e('Text + reminder', "Tell Mia I'm running late and remind me to buy flowers at 6pm"),
+        e('No fitting tool', 'Take a photo'),
       ] },
       { name: 'Travel', tools: travel, examples: [
         e('Flights', 'Find a flight from Brussels to Lisbon on March 3rd for 2 people'),
         e('Hotel + car', 'Book a hotel in Rome for 4 nights and rent a luxury car for 3 days there'),
         e('Exchange rate', 'What is the EUR to USD exchange rate?'),
         e('Car rental', 'Rent an SUV in Denver for 5 days'),
+        e('No fitting tool', 'Book a train to Paris for Friday'),
+      ] },
+      { name: 'Work assistant', tools: work, examples: [
+        e('Find + email', 'Find the budget spreadsheet and email it to Omar with subject Budget'),
+        e('Chat', 'Ping Tom on chat that the build is green'),
+        e('Reminder + chat', "Remind me to send the invoice on Friday and let Jules know on chat that it's coming"),
+        e('Files', 'Find the onboarding slides'),
+        e('Translate', "Translate 'where is the train station' into Japanese"),
+        e('Split a bill', 'Split a 84.50 bill between 3 people with a 15% tip'),
+        e('No fitting tool', 'Delete all my emails from last week'),
       ] },
     ],
   },
