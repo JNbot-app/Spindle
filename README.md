@@ -15,9 +15,9 @@ and classifies it, because both are just a tool call with the right schema.
 - **Always valid output.** Decoding follows a grammar built from your schemas, so every call parses and fits
   its schema. Each call comes with a probability, so you can decide what to do with unsure ones.
 - **Trained to say no.** When no listed tool fits, Spindle is trained to return no call instead of
-  picking the nearest one.
+  picking the nearest one. Its call / no-call choice is learned from a teacher that reasons before it decides.
 - **Yours to fine-tune.** One command fine-tunes it on your own JSONL data; the released model was trained
-  in about eight hours on two T4 GPUs.
+  in about two hours on two T4 GPUs (not counting its teacher).
 
 Spindle is built on [Needle 3](https://github.com/cactus-compute/needle) by Cactus Compute. It keeps the
 architecture and changes how the model is fine-tuned and run: [what changed, and why](docs/changes-from-needle-3.md).
@@ -30,17 +30,17 @@ architecture and changes how the model is fine-tuned and run: [what changed, and
 
 | Benchmark | Metric | Spindle | Needle 3 | LFM3-1.7B |
 | --- | --- | ---: | ---: | ---: |
-| Mobile Actions | exact | 81.0 | 85.5 | **87.0** |
-| DroidCall | exact | 34.0 | 41.0 | **50.0** |
-| BFCL v4 | AST | 49.5 | 40.5 | **73.0** |
-| When2Call | acc. | 63.5 | 64.5 | **68.0** |
-| Tool removed | acc. | 45.0 | 38.0 | **65.5** |
-| DSTC8 | F1 | 41.9 | 36.2 | **44.8** |
-| SNIPS | F1 | 26.1 | 16.5 | **30.5** |
-| SNIPS 7-way | F1 | 21.9 | 11.7 | **26.8** |
-| Rotten Tomatoes | acc. | **71.0** | 48.5 | 15.5 |
-| DBpedia | acc. | 20.0 | 31.0 | **79.5** |
-| **Mean** | | 45.4 | 41.3 | **54.1** |
+| Mobile Actions | exact | 86.0 | 85.5 | **87.0** |
+| DroidCall | exact | 33.5 | 41.0 | **50.0** |
+| BFCL v4 | AST | 53.0 | 40.5 | **73.0** |
+| When2Call | acc. | **70.0** | 64.5 | 68.0 |
+| Tool removed | acc. | 53.5 | 38.0 | **65.5** |
+| DSTC8 | F1 | 43.4 | 36.2 | **44.8** |
+| SNIPS | F1 | 23.8 | 16.5 | **30.5** |
+| SNIPS 7-way | F1 | 21.1 | 11.7 | **26.8** |
+| Rotten Tomatoes | acc. | **66.5** | 48.5 | 15.5 |
+| DBpedia | acc. | 28.0 | 31.0 | **79.5** |
+| **Mean** | | 47.9 | 41.3 | **54.1** |
 | Time per request (M1) | | 0.47 s | 0.38 s | 9.36 s |
 | File size | | 75 MB | 35 MB | 1.1 GB |
 
@@ -48,12 +48,13 @@ architecture and changes how the model is fine-tuned and run: [what changed, and
 official engine with its shipped file; LFM3-1.7B runs in llama.cpp with thinking off.
 [How each set is scored](docs/benchmarks.md).
 
-- **Against Needle 3**, the model it starts from, Spindle is better at picking from larger tool lists
-  (BFCL), at declining when no tool fits, at extraction and at sentiment. It is behind on the two
-  phone-assistant sets (Mobile Actions, DroidCall) and on topic classification.
-- **LFM3-1.7B**, a general model 15 times larger, scores higher on almost every set, but takes about
-  20 times longer per request on the same laptop. On Rotten Tomatoes it mostly wrote text instead of
-  calling the tool, which is why it scores low there.
+- **Against Needle 3**, the model it starts from, Spindle is better at declining when no tool fits
+  (When2Call, Tool removed), at picking from larger tool lists (BFCL), at extraction and at sentiment,
+  and level on Mobile Actions. It is behind on DroidCall, mostly because it declines some requests that
+  Needle 3 calls, and slightly on topic classification (DBpedia).
+- **LFM3-1.7B**, a general model 15 times larger, scores higher on most sets, but takes about 20 times
+  longer per request on the same laptop. Spindle is ahead on When2Call and Rotten Tomatoes (where LFM3 mostly
+  wrote text instead of calling the tool).
 
 <p align="center"><img src="docs/images/size.svg" alt="Mean score against model size" width="760"></p>
 
@@ -93,14 +94,18 @@ spindle run models/spindle.cact --tools examples/tools.json "Set a timer for 10 
 ```
 
 The tool part of the prompt is cached, so repeated requests with the same tools only process the new text.
+Values copied from the request are kept word for word (the copy guard, `copy_margin=4`; `0` turns it off).
+For closed label lists with many labels, `debias_enums=True` corrects the model's pull towards a few labels,
+learned from earlier requests; it assumes the labels come up about equally often, so it is off by default.
+
 A system prompt with the current date (`Spindle(..., system="Current date and time: 2025-06-02T09:30")`)
 lets the model resolve "tomorrow at noon" and "next Tuesday".
 
 **Faster decoding (decode skip, off by default).** Generated tokens can skip some layers; the prompt still
-runs every layer. `spindle-fast.cact` (same release) is trained to skip 7 of its 20 layers: load it with
-`Spindle("spindle-fast.cact", decode_skip=True)` (or `--decode-skip`) and it generates about 1.4 times
-faster, for about 1.6 points less on five tool-calling sets (400 cases). For your own model,
-`spindle pick-skip model.cact` measures which layers it can skip. [How it works](docs/changes-from-needle-3.md#8-decode-skip).
+runs every layer. `spindle pick-skip model.cact` measures which layers a model can skip, and a short
+`spindle finetune --skip-layers ...` run heals it; run the result with `decode_skip=True` (or `--decode-skip`).
+On an earlier checkpoint this generated about 1.4 times faster for about 1.6 points less.
+[How it works](docs/changes-from-needle-3.md#8-decode-skip).
 
 ## Extraction and classification
 
@@ -154,7 +159,7 @@ The result is `runs/my-run/model.cact`. `spindle finetune -h` lists every settin
   guessing from the request. Tune with `--tool-variety` and `--absent-tools` (0 turns each off).
 - **Decode skip.** `--skip-layers 5-8,10,13,15` trains the model to run without those layers for the
   tokens it generates, and saves the list in the new file (run it with `--decode-skip`). Get a list for your
-  model with `spindle pick-skip`. Fine-tuning `spindle-fast.cact` keeps its list; `--skip-layers none` drops it.
+  model with `spindle pick-skip`. Fine-tuning a file that has a list keeps it; `--skip-layers none` drops it.
 - **What is trained.** All weights, with their own learning rates for the backbone, the Monarch MLP factors
   and a runtime LoRA on attention. The 4-bit weights barely move under fine-tuning, so most of the learning
   goes into the FP16 parts; [the design notes](docs/changes-from-needle-3.md) explain why.
@@ -180,7 +185,7 @@ spindle bench my-model --server http://127.0.0.1:8080/v1 --quick  # e.g. llama.c
 | Parent | Needle 3, re-exported with 4-bit weights and converted to Monarch MLP factors (same outputs) |
 | Size | 75 MB file; about 120M parameters, of which 6M are FP16 (Monarch factors and LoRA) |
 | Context | 1024-token attention window by default (`window=`) |
-| Training | 5,000 updates on about 150k rows, two NVIDIA T4 GPUs, about 8 hours |
+| Training | 1,000 updates (32k rows, batch 32) from Needle 3, two NVIDIA T4 GPUs, about 2 hours; call / no-call choice distilled from a reasoning-trained teacher |
 | Languages | English |
 
 The training mix, built by `spindle build-data` from public data and templates (no text written by another
@@ -188,7 +193,7 @@ language model):
 
 | Task | Share | Sources |
 | --- | ---: | --- |
-| Tool calling | 45% | [xLAM](https://huggingface.co/datasets/Salesforce/xlam-function-calling-60k), [ToolACE](https://huggingface.co/datasets/Team-ACE/ToolACE), [Glaive v2](https://huggingface.co/datasets/glaiveai/glaive-function-calling-v2), [CLINC150](https://huggingface.co/datasets/clinc/clinc_oos), [Banking77](https://huggingface.co/datasets/PolyAI/banking77), generated requests with relative dates |
+| Tool calling | 45% | [xLAM](https://huggingface.co/datasets/Salesforce/xlam-function-calling-60k), [ToolACE](https://huggingface.co/datasets/Team-ACE/ToolACE), [Glaive v2](https://huggingface.co/datasets/glaiveai/glaive-function-calling-v2), [CLINC150](https://huggingface.co/datasets/clinc/clinc_oos), [Banking77](https://huggingface.co/datasets/PolyAI/banking77), generated requests with relative dates, two requests joined into one (about 15% of the rows) |
 | No fitting tool | 15% | [When2Call](https://huggingface.co/datasets/nvidia/When2Call), Glaive, CLINC150 out-of-scope, ToolACE, Banking77 |
 | Extraction | 25% | [MASSIVE](https://huggingface.co/datasets/AmazonScience/massive), [Few-NERD](https://huggingface.co/datasets/DFKI-SLT/few-nerd), [Pile-NER](https://huggingface.co/datasets/Universal-NER/Pile-NER-type), [ATIS](https://huggingface.co/datasets/tuetschek/atis), generated records |
 | Classification | 15% | [SST-2](https://huggingface.co/datasets/stanfordnlp/sst2), [TweetEval](https://huggingface.co/datasets/cardiffnlp/tweet_eval), [Emotion](https://huggingface.co/datasets/dair-ai/emotion), [AG News](https://huggingface.co/datasets/fancyzhx/ag_news), Banking77 |
@@ -203,6 +208,8 @@ commercial use.
 - **Long tool lists.** Prompts beyond the 1024-token window push early tools out of view. Short tool
   descriptions help; so does a larger `window`, at some extra latency.
 - **Several calls in one request.** Requests that need several different calls are the weakest case.
+- **Optional details.** With many optional fields, the model sometimes leaves one out even when the text
+  states it (a price limit next to a colour and a sort order, say). Clear wording ("below 80 euro") helps.
 - **Caution over recall.** The output checks drop calls that the request does not support. That makes the
   model decline more, sometimes also when a call was wanted. `filters=False` returns every decoded call.
 - **English only.**

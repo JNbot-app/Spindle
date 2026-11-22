@@ -9,10 +9,12 @@ in three places: the MLP block, how the model is fine-tuned, and the engine that
 | MLP mixing | Kronecker: one 32×32 matrix shared by all 32 groups | Monarch: one 32×32 matrix per group |
 | Fine-tuning | LoRA on attention, merged into the 4-bit weights at export | Full fine-tune, with a separate rate for the MLP blocks and an unmerged FP16 LoRA |
 | Training loss | Cross-entropy on the answer | Same, plus weights on argument values and no-call answers, plus a span attention loss |
-| Training data | Used as given | Varied tool lists, plus "no call" rows where the needed tool is missing |
+| Training data | Used as given | Varied tool lists, "no call" rows where the needed tool is missing, and requests that join two calls |
+| Call or no call | Learned from the answers | Also distilled from a teacher that reasons before it decides |
 | Attention window | 256 tokens in the file header | 1024 tokens by default, set at run time (`window`) |
 | Output | Reasoning, then calls | Calls, with an optional reasoning note |
 | Confidence | Learned confidence head | Probability of each call, measured during decoding |
+| Decoding | Grammar-constrained | Same, plus a copy guard (on) and enum debiasing (opt-in) |
 | Engine | Cactus prebuilt engines | Own C++ CPU engine that reads the new tensors |
 
 The numbers below come from development experiments on earlier checkpoints, each against a matched control.
@@ -235,26 +237,65 @@ assumes nothing about which layers matter: each model gets its own list, measure
   take over the work. The list is saved in header fields 45-46 of the new `.cact` file (a bit mask), and
   later fine-tunes of that file keep it (`--skip-layers none` drops it).
 
-**For the base model.** On `spindle.cact`, `pick-skip` and a learned per-token router (an earlier
+**Measured on an earlier Spindle checkpoint.** `pick-skip` and a learned per-token router (an earlier
 experiment) found lists of equal cost: the router dropped layers 5, 6, 7, 8, 10, 13 and 15, and the picker
 chose 1, 3, 5, 8, 13, 15 and 18 (0.063 vs 0.064 extra loss per token, 40 requests). Skipping every other
 middle layer (4, 6, ..., 16) cost 0.30, and in a full test lost about 9 points, mostly on picking the right
 tool. Which layers are skipped matters a lot, and it differs per model, which is why the list is measured.
 
-`spindle-fast.cact` is the base model healed for 1,000 updates on the general mix with layers 5, 6, 7, 8,
-10, 13 and 15 skipped. Same 400 cases (80 each from Mobile Actions, DroidCall, DSTC8, BFCL and When2Call),
-free generation with the grammar, one Apple M1 laptop:
+Healing that checkpoint for 1,000 updates on the general mix with layers 5, 6, 7, 8, 10, 13 and 15 skipped
+gave this, on 400 cases (80 each from Mobile Actions, DroidCall, DSTC8, BFCL and When2Call), free generation
+with the grammar, one Apple M1 laptop:
 
 | Model | Mean | Mobile Actions | DroidCall | DSTC8 | BFCL | When2Call | Decode time per token |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| spindle.cact | 53.7 | 78.8 | 36.2 | 43.7 | 48.8 | 61.2 | 2.93 ms |
-| spindle-fast.cact, `--decode-skip` | 52.1 | 71.2 | 31.2 | 41.6 | 47.5 | 68.8 | 2.11 ms (1.39x) |
+| Checkpoint, all layers | 53.7 | 78.8 | 36.2 | 43.7 | 48.8 | 61.2 | 2.93 ms |
+| Healed copy, decode skip on | 52.1 | 71.2 | 31.2 | 41.6 | 47.5 | 68.8 | 2.11 ms (1.39x) |
 
-The two give the same result on 339 of 400 cases; the fast model gets 27 of the others right and 34 wrong,
+The two give the same result on 339 of 400 cases; the healed copy gets 27 of the others right and 34 wrong,
 a difference within noise for this many cases (McNemar p = 0.44). The largest drop is on Mobile Actions;
-When2Call goes up. With decode skip off, `spindle-fast.cact` runs every layer and
-still works (52.5 vs 50.6 with skip on, 200 of the same cases), but it is slower than `spindle.cact` with no gain,
-so use it with the skip on.
+When2Call goes up. No decode-skip model ships with the current release: run `pick-skip` and a short
+`--skip-layers` fine-tune on the released model to make one.
+
+## 9. Learning when to call from a teacher that reasons
+
+A model that writes a short reasoning note first ("No tool available ...", or a tool name and why) is
+better at one thing: deciding whether to call at all. In our tests such a model declined 66% of the cases
+where the needed tool was missing, against 45% for the same training without notes. But the notes cost tokens
+on a CPU, and they made its other answers worse.
+
+Spindle keeps only that decision. During fine-tuning, a reasoning-trained teacher reads the same prompt and
+its chance of declining becomes a soft target for one token of the student: the first token after
+`<tool_call>`, which is `[]` (no call) or `[{"` (a call). Nothing else of the teacher is copied, so the
+student keeps writing calls only (`spindle finetune --teacher teacher.cact --distill-weight 1`,
+`spindle/training/decision.py`). It adds about 12% to the training time.
+
+**Effect** (matched runs, 200 cases per set): When2Call 60.5 → 68.0, tool removed 45.5 → 48.0, mean of all ten
+sets 45.2 → 46.5. A higher distill weight did not move declines further.
+
+## 10. Requests with two calls
+
+Most training requests need one call, so the model tended to stop after the first call of a request that
+asked for two things. `spindle build-data --combined 0.15` joins two single-call requests from the mix into
+one ("... and ..."), with both calls as the answer. The released model trained on about 15% of such rows.
+In a matched pair of runs (both from Needle 3), the joined rows raised the tool-removed score from 46 to
+53.5 and the mean of all ten sets from 48.6 to 49.5; Mobile Actions moved from 88 to 86 (within noise).
+
+## 11. Copy guard and enum debiasing
+
+Two small decoding rules, applied token by token after the grammar:
+
+- **Copy guard** (on, `copy_margin=4`). A small model often starts copying a phrase from the request and
+  rewords it halfway ("Café Grano de Oro at 25 Calle del Prado" → "... Oro 25 Calle del Prado"). When the
+  string written so far appears in the request and the chosen token breaks the copy, the token that continues
+  the request is taken instead, if the model finds it almost as likely (within 4 in log probability). Ending
+  the string is never blocked, and values that are not in the request (dates, codes) are left alone. It
+  raised Mobile Actions from 76 to 82 with no change elsewhere. `copy_margin=0` turns it off.
+- **Enum debiasing** (opt-in, `debias_enums=True`, `--debias-enums`). With many labels (a 14-way topic
+  list), a small model favours a few of them for almost any input. This option records the model's label
+  probabilities over earlier requests with the same field and labels, and after 8 requests picks by
+  p(label) / mean p(label). It needs no labels, but it assumes the labels come up about equally often over
+  time, so it is off by default. On DBpedia it raised the score from 25.5 to 43.5.
 
 ## Costs at a glance
 
@@ -264,8 +305,10 @@ so use it with the skip on.
 | Runtime LoRA | +4 MB | 3-7% slower |
 | 1024-token window | KV cache ×4 (8-bit) | longer prompts cost a bit more |
 | Tool-prefix cache | one copy of the cached state | prefill of the tool list skipped on repeat requests |
-| Decode skip (off by default; `spindle-fast.cact` with `--decode-skip`) | none | 1.39x faster per generated token, about -1.6 points |
+| Decode skip (off by default; needs a healed model) | none | 1.39x faster per generated token, about -1.6 points (earlier checkpoint) |
 | Span loss, loss weights | none | none |
+| Teacher decisions, two-call rows | none | none (training about 12% slower) |
+| Copy guard, enum debiasing | none | negligible |
 
 ## References
 

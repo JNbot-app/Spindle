@@ -1,5 +1,6 @@
 // Tool calling: prompt, grammar-constrained greedy decoding, result (port of spindle/inference/caller.py).
 import { IncrementalSampler, expandRefs, topK } from './grammar.js';
+import { copyGuard } from './copying.js';
 import { filterCalls } from './filters.js';
 
 const IM_START = '<|im_start|>', IM_END = '<|im_end|>';
@@ -154,11 +155,12 @@ class CallTracker {
  * eval(tokens) -> Float32Array logits, reset(), setPrefix(n), prefixReused(), confidence(), context.
  */
 export class Spindle {
-  constructor(engine, tokenizer, { filters = true, minCallProbability = 0 } = {}) {
+  constructor(engine, tokenizer, { filters = true, minCallProbability = 0, copyMargin = 4 } = {}) {
     this.engine = engine;
     this.tokenizer = tokenizer;
     this.filters = filters;
     this.minCallProbability = minCallProbability;
+    this.copyMargin = copyMargin; // keep values copied from the request word for word (0: off), see copying.js
     this.setTools([]);
   }
 
@@ -192,9 +194,10 @@ export class Spindle {
     this.engine.reset();
     let logits = this.engine.eval(ids);
     const prefill = (performance.now() - started) / 1000;
-    const generated = [];
+    const generated = [], queryBytes = new TextEncoder().encode(query);
     for (let step = 0; step < maxNewTokens; step++) {
-      const token = step === 0 ? sampler.openId : sampler.selectToken(logits);
+      let token = step === 0 ? sampler.openId : sampler.selectToken(logits);
+      if (step > 0 && this.copyMargin) token = copyGuard(sampler, logits, token, queryBytes, this.copyMargin);
       if (sampler.mode === 'json' && token !== sampler.closeId) {
         const value = constrainedLogProbability(logits, token, sampler);
         for (const index of tracker.feed(sampler.pieces[token])) {

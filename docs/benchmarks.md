@@ -9,17 +9,17 @@ rules. Nothing here is used for training: the training mix (`spindle build-data`
 
 | Benchmark | Metric | Spindle | Needle 3 | LFM3-1.7B |
 | --- | --- | ---: | ---: | ---: |
-| Mobile Actions | exact | 81.0 | 85.5 | **87.0** |
-| DroidCall | exact | 34.0 | 41.0 | **50.0** |
-| BFCL v4 | AST | 49.5 | 40.5 | **73.0** |
-| When2Call | acc. | 63.5 | 64.5 | **68.0** |
-| Tool removed | acc. | 45.0 | 38.0 | **65.5** |
-| DSTC8 | F1 | 41.9 | 36.2 | **44.8** |
-| SNIPS | F1 | 26.1 | 16.5 | **30.5** |
-| SNIPS 7-way | F1 | 21.9 | 11.7 | **26.8** |
-| Rotten Tomatoes | acc. | **71.0** | 48.5 | 15.5 |
-| DBpedia | acc. | 20.0 | 31.0 | **79.5** |
-| **Mean** | | 45.4 | 41.3 | **54.1** |
+| Mobile Actions | exact | 86.0 | 85.5 | **87.0** |
+| DroidCall | exact | 33.5 | 41.0 | **50.0** |
+| BFCL v4 | AST | 53.0 | 40.5 | **73.0** |
+| When2Call | acc. | **70.0** | 64.5 | 68.0 |
+| Tool removed | acc. | 53.5 | 38.0 | **65.5** |
+| DSTC8 | F1 | 43.4 | 36.2 | **44.8** |
+| SNIPS | F1 | 23.8 | 16.5 | **30.5** |
+| SNIPS 7-way | F1 | 21.1 | 11.7 | **26.8** |
+| Rotten Tomatoes | acc. | **66.5** | 48.5 | 15.5 |
+| DBpedia | acc. | 28.0 | 31.0 | **79.5** |
+| **Mean** | | 47.9 | 41.3 | **54.1** |
 | Time per request (M1) | | 0.47 s | 0.38 s | 9.36 s |
 | File size | | 75 MB | 35 MB | 1.1 GB |
 
@@ -30,6 +30,8 @@ Notes on these runs:
 - LFM3-1.7B wrote text until the 512-token answer limit on most Rotten Tomatoes reviews instead of calling
   the tool, even though the request asked for a call (`tool_choice: required`). Its 15.5 there reflects that,
   not its sense of sentiment. It also makes its time per request higher.
+- Spindle's enum debiasing is off in these runs. Turned on (`--debias-enums`), DBpedia goes from 28.0 to
+  46.5 (mean 49.5); the other sets stay within 1.5 points.
 - The per-set summaries, including call and decline rates, are in
   [`benchmarks/results/`](../benchmarks/results).
 
@@ -59,7 +61,7 @@ seed 0), greedy decoding.
 
 | Model | File | Runtime | Settings |
 | --- | --- | --- | --- |
-| Spindle | `spindle.cact`, 4-bit | This repository's engine | Window 1024, output filters on (the defaults) |
+| Spindle | `spindle.cact`, 4-bit | This repository's engine | Window 1024, output filters and copy guard on, enum debiasing off (the defaults) |
 | Needle 3 | The shipped 2-bit `needle3.cact` | The official Cactus engine | Its defaults |
 | LFM3-1.7B | `LFM3-1.7B-Q4_K_M.gguf` | llama.cpp `llama-server` (b11960) | Chat template with tools, thinking off, 4 threads |
 

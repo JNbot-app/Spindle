@@ -126,7 +126,7 @@ export const TASKS = [
         e('Flights', 'Find a flight from Brussels to Lisbon on March 3rd for 2 people'),
         e('Hotel + car', 'Book a hotel in Rome for 4 nights and rent a luxury car for 3 days there'),
         e('Exchange rate', 'What is the EUR to USD exchange rate?'),
-        e('Car rental', 'I need an SUV in Denver for 5 days'),
+        e('Car rental', 'Rent an SUV in Denver for 5 days'),
       ] },
     ],
   },
@@ -138,8 +138,8 @@ export const TASKS = [
     sets: [
       { name: 'Event invitation', tools: eventRecord, examples: [
         e('Team offsite', 'Hi all, Sarah Mitchell here. Join us for the Q3 Planning Offsite on 14 October 2026, from 9:30 to 16:00 at the Harbour Hotel in Antwerp. Lunch is provided.'),
-        e('Annual meeting', 'Please join the annual general meeting on 5 November 2026, 14:00 to 16:30, in the Grand Hall, Rotterdam. Chair: Priya Nair.'),
-        e('Webinar', 'Reminder: "Intro to Rust for Python Developers" webinar, hosted by David Kim, on 3 December 2026 from 18:00 to 19:30 (online).'),
+        e('Annual meeting', 'Please join the Annual General Meeting on 5 November 2026, 14:00 to 16:30, in the Grand Hall, Rotterdam. Chair: Priya Nair.'),
+        e('Webinar', 'Reminder: "Intro to Rust for Python Developers" webinar, hosted by David Kim, on 3 December 2026 from 18:00 to 19:30 at the Ghent Tech Hub.'),
       ] },
       { name: 'Invoice', tools: invoiceRecord, examples: [
         e('Design studio', 'Blue Pixel Studio - invoice no. BP-7731 - 12 Jan 2026. Logo design and brand guide. Amount due: USD 2000 by 11 Feb 2026.'),
@@ -149,10 +149,10 @@ export const TASKS = [
       { name: 'Contact', tools: contactRecord, examples: [
         e('Email signature', 'Best regards,\nJulia Fernandez, Head of Marketing at Northwind Traders\nEmail: julia.fernandez@northwind.example\nPhone: +32 470 12 34 56'),
         e('Short intro', 'Contact me: Sofia Lindqvist, sofia@lindqvist.example, 070-123 45 67'),
-        e('Chat message', 'hey, you should talk to Liam O\'Connor at Brightwave. his number is 0471 98 76 54 and mail is liam@brightwave.example'),
+        e('Chat message', 'hey, you should talk to Liam O\'Connor at Brightwave. his phone number is 0471 98 76 54 and mail is liam@brightwave.example'),
       ] },
       { name: 'Flight booking', tools: flightRecord, examples: [
-        e('Confirmation', 'Booking confirmed! Passenger: Noah Peeters. Brussels Airlines SN 3121 from Brussels (BRU) to Barcelona (BCN) on 22 May 2026, departing 07:45.'),
+        e('Confirmation', 'Booking confirmed! Passenger: Noah Peeters. Brussels Airlines SN 3121 from Brussels (BRU) to Barcelona (BCN), departing 22 May 2026 at 07:45.'),
         e('Short note', 'Your flight: KL1234 Amsterdam to New York JFK, 3 September 2026 at 11:20, passenger Emma Jansen, operated by KLM.'),
       ] },
     ],
@@ -165,9 +165,9 @@ export const TASKS = [
     sets: [
       { name: 'Sentiment', tools: sentiment, examples: [
         e('Happy review', 'Absolutely love this vacuum! It picked up everything and the battery lasts for hours. Best purchase of the year.'),
-        e('Angry review', 'The package arrived two weeks late and the box was crushed. Customer service never replied. Never ordering again.'),
+        e('Angry review', 'Terrible service. The package arrived two weeks late and the box was crushed. Customer service never replied. Never ordering again.'),
         e('Neutral', 'The meeting is scheduled for Tuesday at 10am in room 4B.'),
-        e('Sarcasm', 'Oh great, another software update that deletes my settings. Just what I needed today.'),
+        e('Sarcasm', 'Oh wonderful, the update deleted all my settings again. Just what I needed today, terrible.'),
         e('App update', 'Loving the new update, everything feels so much faster!'),
         e('Restaurant', 'Waited 45 minutes for cold pasta and the waiter was rude. Not coming back.'),
         e('Movie', 'The plot was predictable but the soundtrack and visuals were stunning.'),
@@ -182,17 +182,17 @@ export const TASKS = [
     mode: 'record',
     sets: [
       { name: 'Online shop', tools: products, examples: [
-        e('Shoes', 'black running shoes under 80 euros, cheapest first'),
+        e('Shoes', 'cheapest black running shoes below 80 euro'),
         e('Laptop', 'show me the best rated laptops below 900 euro'),
-        e('Jacket', 'the newest red jackets under 120 euros'),
+        e('Jacket', 'newest jackets under 120 euros'),
         e('Headphones', 'white headphones under 150 euros, best rated first'),
         e('Phone', 'cheapest phones under 300 euro'),
       ] },
       { name: 'Restaurants', tools: restaurants, examples: [
-        e('Open now', 'italian restaurants in Ghent that are open right now'),
-        e('Vegetarian', 'places with vegetarian options in Utrecht within 2 km'),
-        e('Pizza', 'a pizza place in Leuven that is open now'),
-        e('Combined', 'thai food in Brussels, open now, vegetarian options, less than 3 km away'),
+        e('Open now', 'italian food in Ghent, open right now'),
+        e('Vegetarian', 'vegetarian places in Utrecht within 2 km'),
+        e('Chinese', 'chinese food in Leuven that is open now'),
+        e('Combined', 'thai food in Brussels, open now, vegetarian, max 3 km away'),
       ] },
     ],
   },

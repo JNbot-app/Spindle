@@ -124,8 +124,8 @@ def main(argv=None):
     bench.add_argument('--decode-skip', nargs='?', const=True, metavar='LAYERS', help=DECODE_SKIP_HELP)
     bench.add_argument('--debias-enums', action='store_true',
                        help='Correct the pull towards some labels of enum lists, learned from earlier cases')
-    bench.add_argument('--copy-margin', type=float, default=0.0,
-                       help='Keep values copied from the request word for word (log-prob margin, 0: off)')
+    bench.add_argument('--copy-margin', type=float, default=4.0,
+                       help='Keep values copied from the request word for word (log-prob margin, 0: off; default 4)')
     bench.add_argument('--threads', type=int, default=0, help='Worker threads (0: automatic)')
     bench.add_argument('--library', help='Path to the native engine library')
     bench.set_defaults(handler=_bench)
@@ -159,7 +159,13 @@ def main(argv=None):
     monarch.add_argument('output')
     monarch.set_defaults(handler=_monarch)
 
-    args = parser.parse_args(argv)
+    # Requests may come after the options (`spindle run model --tools t.json "request"`); argparse
+    # cannot mix positionals with options for subcommands, so leftover words become requests.
+    args, extra = parser.parse_known_args(argv)
+    if extra:
+        if args.command != 'run' or any(word.startswith('-') for word in extra):
+            parser.error(f'unrecognized arguments: {" ".join(extra)}')
+        args.query += extra
     args.handler(args)
 
 
