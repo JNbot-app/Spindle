@@ -753,6 +753,7 @@ struct JsonState {
         for (const JsonPtr &option : effective(frame)) {
             const Json *extra = option->get("additionalProperties");
             if (extra && !extra->is_false()) return std::nullopt;
+            if (!extra && !option->has("properties")) return std::nullopt;  // free-form object: any key
             if (const Json *properties = option->get("properties"); properties && properties->kind == Json::Object)
                 for (const auto &field : properties->fields)
                     if (!frame.value->has(field.first) && std::find(keys.begin(), keys.end(), field.first) == keys.end())
@@ -775,7 +776,8 @@ struct JsonState {
             } else {
                 const Json *properties = item->get("properties");
                 JsonPtr own = properties && properties->kind == Json::Object ? properties->get_ptr(frame.key) : nullptr;
-                candidate = own ? own : item->has("additionalProperties") ? item->get_ptr("additionalProperties") : make_bool(false);
+                candidate = own ? own : item->has("additionalProperties") ? item->get_ptr("additionalProperties")
+                          : properties ? make_bool(false) : std::make_shared<Json>(EMPTY_OBJECT);  // free-form: any value
             }
             if (!candidate->is_false()) candidates.push_back(candidate);
         }

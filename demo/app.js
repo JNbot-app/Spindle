@@ -3,7 +3,7 @@ import { $, el, icon, iconButton } from './dom.js';
 import { createToolsEditor } from './tools-editor.js';
 
 const MODEL_URLS = ['spindle.cact', '../models/spindle.cact']; // deployed copy, then the repo copy for local use
-const CACHE_NAME = 'spindle-model-0.2.0';
+const CACHE_NAME = 'spindle-model-0.3.0';
 
 // ---------------------------------------------------------------- model loading
 const worker = new Worker('worker.js', { type: 'module' });

@@ -2,7 +2,7 @@ import itertools
 
 from datetime import datetime
 
-from spindle.datasets import dates, mix, records
+from spindle.datasets import app_actions, dates, mix, records
 from spindle.datasets.tool_calling import _parse_call, _split_calls
 
 
@@ -65,3 +65,16 @@ def test_combined_rows_join_two_requests():
     assert rows and all(len(r['answers']) == 2 and len(r['tools']) == 2 for r in rows)
     assert all({'Turn on the light', 'jazz'} <= {w for w in ('Turn on the light', 'jazz') if w.lower() in r['query'].lower()}
                for r in rows)
+
+
+def test_app_actions_rows():
+    rows = list(app_actions.generate(300, 100, seed=3))
+    assert sum(row['task'] == 'no_call' for row in rows) == 100
+    for row in rows:
+        names = {tool['name'] for tool in row['tools']}
+        assert row['teacher'] is False and len(names) == len(row['tools'])
+        for answer in row['answers']:  # calls use listed tools and only their own fields
+            tool = next(t for t in row['tools'] if t['name'] == answer['name'])
+            assert set(answer['arguments']) <= set(tool['parameters']['properties'])
+        if row['task'] == 'no_call':
+            assert not row['answers']

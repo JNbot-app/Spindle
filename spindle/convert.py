@@ -9,10 +9,12 @@ KEEP = ('description', 'enum', 'required')
 
 
 def json_type(name):
-    """'str', 'STRING', 'List[int]', 'int, optional' -> a JSON Schema type (None when unknown)."""
-    name = str(name).lower().split(',')[0].strip()
+    """'str', 'STRING', 'List[int]', 'int, optional', 'Optional[Dict[str, Any]]' -> a JSON Schema type
+    (None when unknown)."""
+    name = str(name).lower().strip()
     if name.startswith('optional[') and name.endswith(']'):
         name = name[9:-1]
+    name = name.split(',')[0].strip()
     return TYPES.get(name.split('[')[0].strip())
 
 

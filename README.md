@@ -34,17 +34,17 @@ architecture and changes how the model is fine-tuned and run: [what changed, and
 | Benchmark | Metric | Spindle | Needle 3 | LFM3-1.7B | Qwen3.5-0.8B | FunctionGemma-270M |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
 | Mobile Actions | exact | 86.0 | 85.5 | **87.0** | 78.5 | 39.0 |
-| DroidCall | exact | 33.5 | 41.0 | **50.0** | 19.0 | 25.0 |
+| DroidCall | exact | 35.5 | 41.0 | **50.0** | 19.0 | 25.0 |
 | BFCL v4 | AST | 53.0 | 40.5 | **73.0** | 53.5 | 41.5 |
-| When2Call | acc. | **70.0** | 64.5 | 68.0 | 62.5 | 64.5 |
-| Tool removed | acc. | 53.5 | 38.0 | **65.5** | 26.0 | 43.0 |
-| DSTC8 | F1 | 43.4 | 36.2 | **44.8** | 29.5 | 21.5 |
-| SNIPS | F1 | 23.8 | 16.5 | **30.5** | 15.1 | 18.9 |
-| SNIPS 7-way | F1 | 21.1 | 11.7 | **26.8** | 18.5 | 7.6 |
-| Rotten Tomatoes | acc. | **65.0** | 48.5 | 15.5 | 27.0 | 10.0 |
-| DBpedia | acc. | 46.5 | 31.0 | **79.5** | 53.0 | 2.0 |
-| **Mean** | | 49.6 | 41.3 | **54.1** | 38.3 | 27.3 |
-| Time per request (M1) | | 0.46 s | 0.38 s | 9.36 s | 5.93 s | 0.57 s |
+| When2Call | acc. | 67.5 | 64.5 | **68.0** | 62.5 | 64.5 |
+| Tool removed | acc. | **73.0** | 38.0 | 65.5 | 26.0 | 43.0 |
+| DSTC8 | F1 | 43.1 | 36.2 | **44.8** | 29.5 | 21.5 |
+| SNIPS | F1 | 25.0 | 16.5 | **30.5** | 15.1 | 18.9 |
+| SNIPS 7-way | F1 | 18.2 | 11.7 | **26.8** | 18.5 | 7.6 |
+| Rotten Tomatoes | acc. | **65.5** | 48.5 | 15.5 | 27.0 | 10.0 |
+| DBpedia | acc. | 44.0 | 31.0 | **79.5** | 53.0 | 2.0 |
+| **Mean** | | 51.1 | 41.3 | **54.1** | 38.3 | 27.3 |
+| Time per request (M1) | | 0.52 s | 0.38 s | 9.36 s | 5.93 s | 0.57 s |
 | File size | | 75 MB | 35 MB | 1.1 GB | 532 MB | 253 MB |
 
 200 cases per set, same cases and scoring for every model, on one Apple M1 laptop. Needle 3 runs on its own
@@ -53,11 +53,11 @@ official engine with its shipped file; the other three run in llama.cpp (on the 
 
 - **Against Needle 3**, the model it starts from, Spindle is better at declining when no tool fits
   (When2Call, Tool removed), at picking from larger tool lists (BFCL), at extraction and at classification
-  (Rotten Tomatoes, DBpedia), and level on Mobile Actions. It is behind on DroidCall, mostly because it
-  declines some requests that Needle 3 calls.
+  (Rotten Tomatoes, DBpedia), and level on Mobile Actions. It is behind on DroidCall, where it still
+  declines some requests that Needle 3 calls and misses details such as the exact MIME type.
 - **LFM3-1.7B**, a general model 15 times larger, scores higher on most sets, but takes about 20 times
-  longer per request on the same laptop. Spindle is ahead on When2Call and Rotten Tomatoes (where LFM3 mostly
-  wrote text instead of calling the tool).
+  longer per request on the same laptop. Spindle is ahead on Tool removed (declining when the needed tool is
+  missing) and Rotten Tomatoes (where LFM3 mostly wrote text instead of calling the tool), and close on When2Call.
 - **Qwen3.5-0.8B** (7 times larger than Spindle) and **FunctionGemma-270M**, Google's small tool-calling model
   (3.4 times larger), score lower on average. Qwen is ahead of Spindle on BFCL and DBpedia, and takes
   about 13 times longer per request. FunctionGemma is about as fast, but copies the text into the enum
@@ -203,8 +203,8 @@ language model):
 
 | Task | Share | Sources |
 | --- | ---: | --- |
-| Tool calling | 45% | [xLAM](https://huggingface.co/datasets/Salesforce/xlam-function-calling-60k), [ToolACE](https://huggingface.co/datasets/Team-ACE/ToolACE), [Glaive v2](https://huggingface.co/datasets/glaiveai/glaive-function-calling-v2), [CLINC150](https://huggingface.co/datasets/clinc/clinc_oos), [Banking77](https://huggingface.co/datasets/PolyAI/banking77), generated requests with relative dates, two requests joined into one (about 15% of the rows) |
-| No fitting tool | 15% | [When2Call](https://huggingface.co/datasets/nvidia/When2Call), Glaive, CLINC150 out-of-scope, ToolACE, Banking77 |
+| Tool calling | 45% | [xLAM](https://huggingface.co/datasets/Salesforce/xlam-function-calling-60k), [ToolACE](https://huggingface.co/datasets/Team-ACE/ToolACE), [Glaive v2](https://huggingface.co/datasets/glaiveai/glaive-function-calling-v2), [CLINC150](https://huggingface.co/datasets/clinc/clinc_oos), [Banking77](https://huggingface.co/datasets/PolyAI/banking77), generated requests with relative dates, generated app-style actions (records by URI, files by type, searches, timers), two requests joined into one (about 15% of the rows) |
+| No fitting tool | 15% | [When2Call](https://huggingface.co/datasets/nvidia/When2Call), Glaive, CLINC150 out-of-scope, generated app-style actions, ToolACE, Banking77 |
 | Extraction | 25% | [MASSIVE](https://huggingface.co/datasets/AmazonScience/massive), [Few-NERD](https://huggingface.co/datasets/DFKI-SLT/few-nerd), [Pile-NER](https://huggingface.co/datasets/Universal-NER/Pile-NER-type), [ATIS](https://huggingface.co/datasets/tuetschek/atis), generated records |
 | Classification | 15% | [SST-2](https://huggingface.co/datasets/stanfordnlp/sst2), [TweetEval](https://huggingface.co/datasets/cardiffnlp/tweet_eval), [Emotion](https://huggingface.co/datasets/dair-ai/emotion), [AG News](https://huggingface.co/datasets/fancyzhx/ag_news), Banking77 |
 

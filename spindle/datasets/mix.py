@@ -14,16 +14,18 @@ from pathlib import Path
 
 from spindle import hub, reasoning as notes
 from spindle.prompt import render_example
-from . import classification, combined, dates, extraction, tool_calling
+from . import app_actions, classification, combined, dates, extraction, tool_calling
 
-SOURCES = {**tool_calling.SOURCES, **dates.SOURCES, **extraction.SOURCES, **classification.SOURCES}
+SOURCES = {**tool_calling.SOURCES, **dates.SOURCES, **app_actions.SOURCES, **extraction.SOURCES, **classification.SOURCES}
 
 # Share of the mix per task, and the preferred share of each source inside a task. When a source
 # is missing or too small, the others fill its place in proportion.
 TASKS = {'tools': 0.45, 'no_call': 0.15, 'extract': 0.25, 'classify': 0.15}
 SHARES = {
-    'tools': {'xlam': 0.46, 'toolace': 0.18, 'glaive': 0.18, 'dates': 0.08, 'clinc': 0.07, 'banking77': 0.03},
-    'no_call': {'when2call': 0.40, 'glaive': 0.25, 'clinc': 0.20, 'toolace': 0.10, 'banking77': 0.05},
+    'tools': {'xlam': 0.38, 'toolace': 0.15, 'glaive': 0.15, 'app_actions': 0.14, 'dates': 0.08, 'clinc': 0.07,
+              'banking77': 0.03},
+    'no_call': {'when2call': 0.35, 'glaive': 0.22, 'clinc': 0.18, 'app_actions': 0.125, 'toolace': 0.085,
+                'banking77': 0.04},
     'extract': {'massive': 0.25, 'few_nerd': 0.25, 'records': 0.25, 'pile_ner': 0.17, 'atis': 0.08},
     'classify': {'sst2': 0.25, 'tweet_sentiment': 0.25, 'banking77': 0.15, 'ag_news': 0.13, 'emotion': 0.12,
                  'clinc_labels': 0.10},

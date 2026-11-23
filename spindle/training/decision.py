@@ -43,7 +43,7 @@ class Decisions:
     def encode(self, row, ids, weights):
         """(teacher ids, student position, call token ids) for one encoded row, or None when the
         row has no clean call / no-call decision."""
-        if row.get('task') in ('extract', 'classify'):
+        if row.get('task') in ('extract', 'classify') or row.get('teacher') is False:  # exact labels, no teacher
             return None
         answer = np.flatnonzero(weights > 0)
         if not len(answer):

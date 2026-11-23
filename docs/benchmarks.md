@@ -10,17 +10,17 @@ rules. Nothing here is used for training: the training mix (`spindle build-data`
 | Benchmark | Metric | Spindle | Needle 3 | LFM3-1.7B | Qwen3.5-0.8B | FunctionGemma-270M |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
 | Mobile Actions | exact | 86.0 | 85.5 | **87.0** | 78.5 | 39.0 |
-| DroidCall | exact | 33.5 | 41.0 | **50.0** | 19.0 | 25.0 |
+| DroidCall | exact | 35.5 | 41.0 | **50.0** | 19.0 | 25.0 |
 | BFCL v4 | AST | 53.0 | 40.5 | **73.0** | 53.5 | 41.5 |
-| When2Call | acc. | **70.0** | 64.5 | 68.0 | 62.5 | 64.5 |
-| Tool removed | acc. | 53.5 | 38.0 | **65.5** | 26.0 | 43.0 |
-| DSTC8 | F1 | 43.4 | 36.2 | **44.8** | 29.5 | 21.5 |
-| SNIPS | F1 | 23.8 | 16.5 | **30.5** | 15.1 | 18.9 |
-| SNIPS 7-way | F1 | 21.1 | 11.7 | **26.8** | 18.5 | 7.6 |
-| Rotten Tomatoes | acc. | **65.0** | 48.5 | 15.5 | 27.0 | 10.0 |
-| DBpedia | acc. | 46.5 | 31.0 | **79.5** | 53.0 | 2.0 |
-| **Mean** | | 49.6 | 41.3 | **54.1** | 38.3 | 27.3 |
-| Time per request (M1) | | 0.46 s | 0.38 s | 9.36 s | 5.93 s | 0.57 s |
+| When2Call | acc. | 67.5 | 64.5 | **68.0** | 62.5 | 64.5 |
+| Tool removed | acc. | **73.0** | 38.0 | 65.5 | 26.0 | 43.0 |
+| DSTC8 | F1 | 43.1 | 36.2 | **44.8** | 29.5 | 21.5 |
+| SNIPS | F1 | 25.0 | 16.5 | **30.5** | 15.1 | 18.9 |
+| SNIPS 7-way | F1 | 18.2 | 11.7 | **26.8** | 18.5 | 7.6 |
+| Rotten Tomatoes | acc. | **65.5** | 48.5 | 15.5 | 27.0 | 10.0 |
+| DBpedia | acc. | 44.0 | 31.0 | **79.5** | 53.0 | 2.0 |
+| **Mean** | | 51.1 | 41.3 | **54.1** | 38.3 | 27.3 |
+| Time per request (M1) | | 0.52 s | 0.38 s | 9.36 s | 5.93 s | 0.57 s |
 | File size | | 75 MB | 35 MB | 1.1 GB | 532 MB | 253 MB |
 
 <p align="center"><img src="images/size.svg" alt="Mean score against model size" width="760"></p>
