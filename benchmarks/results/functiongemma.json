@@ -1,0 +1,249 @@
+{
+ "model": "functiongemma-270m-it-Q4_K_M.gguf (llama.cpp)",
+ "limit": 200,
+ "results": {
+  "mobile_actions": {
+   "score": 39.0,
+   "metric": "accuracy",
+   "cases": 200,
+   "call_rate_when_needed": 98.0,
+   "decline_rate_when_not": null,
+   "groups": {},
+   "errors": 0,
+   "seconds_per_case": 0.682
+  },
+  "droidcall": {
+   "score": 25.0,
+   "metric": "accuracy",
+   "cases": 200,
+   "call_rate_when_needed": 71.0,
+   "decline_rate_when_not": null,
+   "groups": {},
+   "errors": 0,
+   "seconds_per_case": 0.472
+  },
+  "bfcl": {
+   "score": 41.5,
+   "metric": "accuracy",
+   "cases": 200,
+   "call_rate_when_needed": 90.2,
+   "decline_rate_when_not": 70.1,
+   "groups": {
+    "irrelevance": {
+     "score": 46.2,
+     "cases": 13
+    },
+    "live_irrelevance": {
+     "score": 75.9,
+     "cases": 54
+    },
+    "live_multiple": {
+     "score": 26.9,
+     "cases": 52
+    },
+    "live_parallel": {
+     "score": 0.0,
+     "cases": 3
+    },
+    "live_simple": {
+     "score": 43.8,
+     "cases": 16
+    },
+    "multiple": {
+     "score": 14.3,
+     "cases": 7
+    },
+    "parallel": {
+     "score": 0.0,
+     "cases": 13
+    },
+    "parallel_multiple": {
+     "score": 0.0,
+     "cases": 12
+    },
+    "simple_java": {
+     "score": 40.0,
+     "cases": 5
+    },
+    "simple_javascript": {
+     "score": 0.0,
+     "cases": 3
+    },
+    "simple_python": {
+     "score": 54.5,
+     "cases": 22
+    }
+   },
+   "errors": 0,
+   "seconds_per_case": 0.678
+  },
+  "when2call": {
+   "score": 64.5,
+   "metric": "accuracy",
+   "cases": 200,
+   "call_rate_when_needed": 78.2,
+   "decline_rate_when_not": 55.7,
+   "groups": {
+    "cannot_answer": {
+     "score": 67.6,
+     "cases": 68
+    },
+    "request_for_info": {
+     "score": 40.7,
+     "cases": 54
+    },
+    "tool_call": {
+     "score": 78.2,
+     "cases": 78
+    }
+   },
+   "errors": 0,
+   "seconds_per_case": 0.784
+  },
+  "tool_removed": {
+   "score": 43.0,
+   "metric": "accuracy",
+   "cases": 200,
+   "call_rate_when_needed": null,
+   "decline_rate_when_not": 43.0,
+   "groups": {},
+   "errors": 0,
+   "seconds_per_case": 0.764
+  },
+  "dstc8": {
+   "score": 21.5,
+   "metric": "field F1",
+   "cases": 200,
+   "call_rate_when_needed": 52.5,
+   "decline_rate_when_not": null,
+   "groups": {
+    "Alarm_1": {
+     "score": 0.0,
+     "cases": 3
+    },
+    "Buses_3": {
+     "score": 25.9,
+     "cases": 19
+    },
+    "Events_3": {
+     "score": 21.6,
+     "cases": 15
+    },
+    "Flights_4": {
+     "score": 0.0,
+     "cases": 6
+    },
+    "Homes_2": {
+     "score": 28.1,
+     "cases": 19
+    },
+    "Hotels_2": {
+     "score": 14.3,
+     "cases": 6
+    },
+    "Hotels_4": {
+     "score": 7.7,
+     "cases": 15
+    },
+    "Media_3": {
+     "score": 58.8,
+     "cases": 6
+    },
+    "Messaging_1": {
+     "score": 66.7,
+     "cases": 2
+    },
+    "Movies_1": {
+     "score": 25.0,
+     "cases": 7
+    },
+    "Music_3": {
+     "score": 42.1,
+     "cases": 5
+    },
+    "Payment_1": {
+     "score": 20.0,
+     "cases": 3
+    },
+    "RentalCars_3": {
+     "score": 5.5,
+     "cases": 27
+    },
+    "Restaurants_2": {
+     "score": 5.4,
+     "cases": 13
+    },
+    "RideSharing_2": {
+     "score": 0.0,
+     "cases": 2
+    },
+    "Services_1": {
+     "score": 50.0,
+     "cases": 10
+    },
+    "Services_4": {
+     "score": 20.5,
+     "cases": 13
+    },
+    "Trains_1": {
+     "score": 14.6,
+     "cases": 17
+    },
+    "Travel_1": {
+     "score": 35.3,
+     "cases": 6
+    },
+    "Weather_1": {
+     "score": 47.6,
+     "cases": 6
+    }
+   },
+   "errors": 0,
+   "seconds_per_case": 0.586
+  },
+  "snips_gold": {
+   "score": 18.9,
+   "metric": "field F1",
+   "cases": 200,
+   "call_rate_when_needed": 70.5,
+   "decline_rate_when_not": null,
+   "groups": {},
+   "errors": 0,
+   "seconds_per_case": 0.56
+  },
+  "snips_7way": {
+   "score": 7.6,
+   "metric": "field F1",
+   "cases": 200,
+   "call_rate_when_needed": 45.5,
+   "decline_rate_when_not": null,
+   "groups": {},
+   "errors": 0,
+   "seconds_per_case": 0.456
+  },
+  "rotten_tomatoes": {
+   "score": 10.0,
+   "metric": "accuracy",
+   "cases": 200,
+   "call_rate_when_needed": 58.5,
+   "decline_rate_when_not": null,
+   "groups": {},
+   "errors": 0,
+   "seconds_per_case": 0.363
+  },
+  "dbpedia": {
+   "score": 2.0,
+   "metric": "accuracy",
+   "cases": 200,
+   "call_rate_when_needed": 94.5,
+   "decline_rate_when_not": null,
+   "groups": {},
+   "errors": 0,
+   "seconds_per_case": 0.399
+  }
+ },
+ "name": "FunctionGemma-270M",
+ "size_mb": 253.1,
+ "order": 5,
+ "note": "llama-server does not read FunctionGemma's call format, so an adapter stops generation at <end_function_call> and converts the call text into tool calls."
+}

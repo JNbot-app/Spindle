@@ -1,0 +1,248 @@
+{
+ "model": "Qwen3.5-0.8B-Q4_K_M.gguf (llama.cpp)",
+ "limit": 200,
+ "results": {
+  "mobile_actions": {
+   "score": 78.5,
+   "metric": "accuracy",
+   "cases": 200,
+   "call_rate_when_needed": 100.0,
+   "decline_rate_when_not": null,
+   "groups": {},
+   "errors": 0,
+   "seconds_per_case": 3.413
+  },
+  "droidcall": {
+   "score": 19.0,
+   "metric": "accuracy",
+   "cases": 200,
+   "call_rate_when_needed": 40.0,
+   "decline_rate_when_not": null,
+   "groups": {},
+   "errors": 0,
+   "seconds_per_case": 3.663
+  },
+  "bfcl": {
+   "score": 53.5,
+   "metric": "accuracy",
+   "cases": 200,
+   "call_rate_when_needed": 62.4,
+   "decline_rate_when_not": 85.1,
+   "groups": {
+    "irrelevance": {
+     "score": 100.0,
+     "cases": 13
+    },
+    "live_irrelevance": {
+     "score": 81.5,
+     "cases": 54
+    },
+    "live_multiple": {
+     "score": 40.4,
+     "cases": 52
+    },
+    "live_parallel": {
+     "score": 66.7,
+     "cases": 3
+    },
+    "live_simple": {
+     "score": 43.8,
+     "cases": 16
+    },
+    "multiple": {
+     "score": 57.1,
+     "cases": 7
+    },
+    "parallel": {
+     "score": 15.4,
+     "cases": 13
+    },
+    "parallel_multiple": {
+     "score": 33.3,
+     "cases": 12
+    },
+    "simple_java": {
+     "score": 40.0,
+     "cases": 5
+    },
+    "simple_javascript": {
+     "score": 0.0,
+     "cases": 3
+    },
+    "simple_python": {
+     "score": 36.4,
+     "cases": 22
+    }
+   },
+   "errors": 0,
+   "seconds_per_case": 4.931
+  },
+  "when2call": {
+   "score": 62.5,
+   "metric": "accuracy",
+   "cases": 200,
+   "call_rate_when_needed": 67.9,
+   "decline_rate_when_not": 59.0,
+   "groups": {
+    "cannot_answer": {
+     "score": 72.1,
+     "cases": 68
+    },
+    "request_for_info": {
+     "score": 42.6,
+     "cases": 54
+    },
+    "tool_call": {
+     "score": 67.9,
+     "cases": 78
+    }
+   },
+   "errors": 0,
+   "seconds_per_case": 4.465
+  },
+  "tool_removed": {
+   "score": 26.0,
+   "metric": "accuracy",
+   "cases": 200,
+   "call_rate_when_needed": null,
+   "decline_rate_when_not": 26.0,
+   "groups": {},
+   "errors": 0,
+   "seconds_per_case": 3.065
+  },
+  "dstc8": {
+   "score": 29.5,
+   "metric": "field F1",
+   "cases": 200,
+   "call_rate_when_needed": 50.5,
+   "decline_rate_when_not": null,
+   "groups": {
+    "Alarm_1": {
+     "score": 25.0,
+     "cases": 3
+    },
+    "Buses_3": {
+     "score": 16.9,
+     "cases": 19
+    },
+    "Events_3": {
+     "score": 26.7,
+     "cases": 15
+    },
+    "Flights_4": {
+     "score": 0.0,
+     "cases": 6
+    },
+    "Homes_2": {
+     "score": 39.5,
+     "cases": 19
+    },
+    "Hotels_2": {
+     "score": 0.0,
+     "cases": 6
+    },
+    "Hotels_4": {
+     "score": 27.3,
+     "cases": 15
+    },
+    "Media_3": {
+     "score": 46.2,
+     "cases": 6
+    },
+    "Messaging_1": {
+     "score": 0.0,
+     "cases": 2
+    },
+    "Movies_1": {
+     "score": 80.0,
+     "cases": 7
+    },
+    "Music_3": {
+     "score": 28.6,
+     "cases": 5
+    },
+    "Payment_1": {
+     "score": 28.6,
+     "cases": 3
+    },
+    "RentalCars_3": {
+     "score": 8.0,
+     "cases": 27
+    },
+    "Restaurants_2": {
+     "score": 18.8,
+     "cases": 13
+    },
+    "RideSharing_2": {
+     "score": 50.0,
+     "cases": 2
+    },
+    "Services_1": {
+     "score": 66.7,
+     "cases": 10
+    },
+    "Services_4": {
+     "score": 47.6,
+     "cases": 13
+    },
+    "Trains_1": {
+     "score": 15.7,
+     "cases": 17
+    },
+    "Travel_1": {
+     "score": 42.1,
+     "cases": 6
+    },
+    "Weather_1": {
+     "score": 38.1,
+     "cases": 6
+    }
+   },
+   "errors": 0,
+   "seconds_per_case": 9.169
+  },
+  "snips_gold": {
+   "score": 15.1,
+   "metric": "field F1",
+   "cases": 200,
+   "call_rate_when_needed": 33.5,
+   "decline_rate_when_not": null,
+   "groups": {},
+   "errors": 0,
+   "seconds_per_case": 10.286
+  },
+  "snips_7way": {
+   "score": 18.5,
+   "metric": "field F1",
+   "cases": 200,
+   "call_rate_when_needed": 82.5,
+   "decline_rate_when_not": null,
+   "groups": {},
+   "errors": 0,
+   "seconds_per_case": 4.756
+  },
+  "rotten_tomatoes": {
+   "score": 27.0,
+   "metric": "accuracy",
+   "cases": 200,
+   "call_rate_when_needed": 37.0,
+   "decline_rate_when_not": null,
+   "groups": {},
+   "errors": 0,
+   "seconds_per_case": 9.976
+  },
+  "dbpedia": {
+   "score": 53.0,
+   "metric": "accuracy",
+   "cases": 200,
+   "call_rate_when_needed": 87.5,
+   "decline_rate_when_not": null,
+   "groups": {},
+   "errors": 0,
+   "seconds_per_case": 5.533
+  }
+ },
+ "name": "Qwen3.5-0.8B",
+ "size_mb": 532.5,
+ "order": 4
+}

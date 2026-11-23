@@ -25,8 +25,9 @@ TASKS = [
 ]
 SETS = [key for _, rows in TASKS for key, _, _ in rows]
 
-# Categorical slots 1-3 (blue, orange, aqua), light and dark steps; checked for colour-blind separation.
-SERIES = [('#2a78d6', '#3987e5'), ('#eb6834', '#d95926'), ('#1baf7a', '#199e70')]
+# Categorical slots, light and dark steps: blue, orange, aqua, purple, gold.
+SERIES = [('#2a78d6', '#3987e5'), ('#eb6834', '#d95926'), ('#1baf7a', '#199e70'),
+          ('#8250c8', '#9a6fdc'), ('#c9970a', '#dfae24')]
 FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif"
 
 
@@ -115,7 +116,7 @@ def scores_chart(models):
     head = (f'<text x="0" y="18" font-size="16" font-weight="600">Score per benchmark</text>'
             f'<text x="0" y="37" font-size="12" class="ink2">Same cases and scoring for every model, '
             f'{cases} cases per set, higher is better. None of these sets is used in training.</text>'
-            + legend(models, left, 58))
+            + legend(models, 0, 58))
     return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" width="{width}" '
             f'height="{height}" role="img" aria-label="Benchmark scores per model">'
             f'{style(len(models))}{head}{grid}{"".join(body)}</svg>\n')
@@ -123,7 +124,7 @@ def scores_chart(models):
 
 def size_chart(models):
     """Mean score against file size (log scale)."""
-    left, top, plot_w, plot_h = 52, 76, 560, 230
+    left, top, plot_w, plot_h = 52, 76, 560, 300
     width, height = left + plot_w + 150, top + plot_h + 48
     sizes = [m['size_mb'] for m in models]
     low, high = 10 ** math.floor(math.log10(min(sizes) * 0.7)), 10 ** math.ceil(math.log10(max(sizes) * 1.4))
