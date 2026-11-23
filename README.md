@@ -4,30 +4,105 @@
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Demo](https://img.shields.io/badge/demo-in%20your%20browser-2a78d6.svg)](https://jnbot-app.github.io/Spindle/)
 
-**A 75 MB tool-calling model that runs on a phone CPU or in a browser tab.**
+Spindle is a 75 MB tool-calling model (about 120M parameters, 4-bit weights) that runs locally on a CPU or in a browser tab. You pass it your tool definitions as JSON Schema along with a user request, and it either picks the right tools and fills in their arguments, or returns nothing when no tool fits.
 
-**[▶ Try the demo in your browser](https://jnbot-app.github.io/Spindle/)**: it downloads the model once and runs it
-on your device. No server, no sign-up, and nothing you type leaves the page.
+Because extraction and classification are just tool calls with the right schema, the same model handles those too. Grammar-constrained decoding ensures every call parses and matches your schema, and each prediction includes a probability so you can threshold uncertain results.
 
-Give Spindle the tools your app exposes (as JSON Schema) and what the user said. It picks the right tools
-and fills in their arguments, or says that none of them fits. The same model also extracts fields from text
-and classifies it, because both are just a tool call with the right schema.
+**[Try the live browser demo](https://jnbot-app.github.io/Spindle/)**. It downloads the model once and runs locally via WebAssembly with no server involved.
 
-- **Small and local.** 4-bit weights, about 120M parameters. A request takes about half a second on a
-  laptop CPU, with no GPU and no server. Nothing leaves the device.
-- **Always valid output.** Decoding follows a grammar built from your schemas, so every call parses and fits
-  its schema. Each call comes with a probability, so you can decide what to do with unsure ones.
-- **Trained to say no.** When no listed tool fits, Spindle is trained to return no call instead of
-  picking the nearest one. Its call / no-call choice is learned from a teacher that reasons before it decides.
-- **Yours to fine-tune.** One command fine-tunes it on your own JSONL data; the released model was trained
-  in about two hours on two T4 GPUs (not counting its teacher).
-
-Spindle is built on [Needle 3](https://github.com/cactus-compute/needle) by Cactus Compute. It keeps the
-architecture and changes how the model is fine-tuned and run: [what changed, and why](docs/changes-from-needle-3.md).
+Spindle is built on [Needle 3](https://github.com/cactus-compute/needle) by Cactus Compute. See [the design notes](docs/changes-from-needle-3.md) for how the fine-tuning and runtime differ.
 
 <p align="center"><img src="docs/images/pipeline.svg" alt="How a request flows through Spindle" width="840"></p>
 
-## Results
+## Quick start
+
+You will need Python, CMake, and a C++17 compiler. On Linux, also install OpenBLAS (`apt install libopenblas-dev`).
+
+Clone the repo, build the native engine, and download the weights:
+
+```sh
+git clone https://github.com/JNbot-app/Spindle
+cd Spindle
+pip install -e .
+cmake -S native -B build/native -DCMAKE_BUILD_TYPE=Release
+cmake --build build/native -j
+curl -L -o models/spindle.cact --create-dirs \
+  https://github.com/JNbot-app/Spindle/releases/latest/download/spindle.cact
+```
+
+### Python
+
+```python
+from spindle import Spindle
+
+tools = [{
+    "name": "get_weather",
+    "description": "Get the current weather for a city.",
+    "parameters": {
+        "type": "object",
+        "required": ["city"],
+        "properties": {"city": {"type": "string"}},
+    },
+}]
+
+with Spindle("models/spindle.cact", tools) as model:
+    result = model("What's the weather in Lagos?")
+    print(result["function_calls"])
+    # [{'name': 'get_weather', 'arguments': {'city': 'Lagos'}}]
+    print(result["call_probabilities"])
+
+    # When no tool fits, function_calls is empty
+    declined = model("Who won the 1998 World Cup?")
+    print(declined["function_calls"])
+    # []
+```
+
+### CLI
+
+```sh
+spindle run models/spindle.cact --tools examples/tools.json "Set a timer for 10 minutes"
+```
+
+Add `--metrics` to print token counts and timing.
+
+## Extraction and classification
+
+To extract structured fields from text, define a single tool whose `parameters` match the fields you want. To classify text, define a tool with an `enum` field. Pass `require_call=True` so the model does not decline:
+
+```python
+sentiment = [{
+    "name": "classify_sentiment",
+    "description": "Classify the sentiment of a text.",
+    "parameters": {
+        "type": "object",
+        "required": ["sentiment"],
+        "properties": {
+            "sentiment": {"type": "string", "enum": ["positive", "negative", "neutral"]},
+        },
+    },
+}]
+
+with Spindle("models/spindle.cact", sentiment) as model:
+    result = model("The battery died after two days.", require_call=True)
+    print(result["function_calls"])
+    # [{'name': 'classify_sentiment', 'arguments': {'sentiment': 'negative'}}]
+```
+
+## Runtime options
+
+The tool prefix of the prompt is cached automatically, so repeated calls with the same `tools` list only evaluate the new user text.
+
+- `system`: Pass a system prompt, such as `system="Current date and time: 2025-06-02T09:30"`, so the model can resolve relative dates like "tomorrow at noon".
+- `window`: Context window size in tokens (default `1024`). Increase this if you have long tool lists, at the cost of higher latency.
+- `require_call`: Set `True` to force a tool call instead of allowing an empty response.
+- `filters`: Set `False` to bypass the output checks and return every decoded call, even ones the request may not fully support.
+- `copy_margin`: Keeps copied argument values matching the input text word for word (default `4`, set `0` to disable).
+- `debias_enums`: Corrects bias toward frequent labels in large closed `enum` lists using counts from earlier calls (default `True`). Set `False` if one label is naturally much more common in your workload.
+- `decode_skip`: Set `True` (or `--decode-skip` in the CLI) to skip selected layers during token generation for faster decoding. This only works on models fine-tuned with `--skip-layers` (see [Fine-tuning](#fine-tuning)).
+
+## Benchmarks
+
+200 cases per set, scored identically across all models on an Apple M1 laptop. Needle 3 runs on its official engine, while LFM3, Qwen3.5, and FunctionGemma run on the GPU via `llama.cpp` with thinking turned off. See [docs/benchmarks.md](docs/benchmarks.md) for dataset details and scoring rules.
 
 <p align="center"><img src="docs/images/benchmarks.svg" alt="Benchmark scores per model" width="760"></p>
 
@@ -47,203 +122,61 @@ architecture and changes how the model is fine-tuned and run: [what changed, and
 | Time per request (M1) | | 0.52 s | 0.38 s | 9.36 s | 5.93 s | 0.57 s |
 | File size | | 75 MB | 35 MB | 1.1 GB | 532 MB | 253 MB |
 
-200 cases per set, same cases and scoring for every model, on one Apple M1 laptop. Needle 3 runs on its own
-official engine with its shipped file; the other three run in llama.cpp (on the GPU) with thinking off.
-[How each set is scored](docs/benchmarks.md).
-
-- **Against Needle 3**, the model it starts from, Spindle is better at declining when no tool fits
-  (When2Call, Tool removed), at picking from larger tool lists (BFCL), at extraction and at classification
-  (Rotten Tomatoes, DBpedia), and level on Mobile Actions. It is behind on DroidCall, where it still
-  declines some requests that Needle 3 calls and misses details such as the exact MIME type.
-- **LFM3-1.7B**, a general model 15 times larger, scores higher on most sets, but takes about 20 times
-  longer per request on the same laptop. Spindle is ahead on Tool removed (declining when the needed tool is
-  missing) and Rotten Tomatoes (where LFM3 mostly wrote text instead of calling the tool), and close on When2Call.
-- **Qwen3.5-0.8B** (7 times larger than Spindle) and **FunctionGemma-270M**, Google's small tool-calling model
-  (3.4 times larger), score lower on average. Qwen is ahead of Spindle on BFCL and DBpedia, and takes
-  about 13 times longer per request. FunctionGemma is about as fast, but copies the text into the enum
-  field instead of choosing a label on classification (DBpedia 2.0).
+Spindle improves on Needle 3 across abstention (When2Call, Tool removed), larger tool lists (BFCL), extraction, and classification, while trailing on DroidCall where it declines more often and misses implicit details like MIME types. Compared to larger general models like LFM3-1.7B and Qwen3.5-0.8B, it gives up some accuracy on complex calls in exchange for a 75 MB footprint and ~0.5 s CPU latency.
 
 <p align="center"><img src="docs/images/size.svg" alt="Mean score against model size" width="760"></p>
 
-## Quick start
-
-```sh
-git clone https://github.com/JNbot-app/Spindle && cd Spindle
-pip install -e .
-cmake -S native -B build/native -DCMAKE_BUILD_TYPE=Release && cmake --build build/native -j
-curl -L -o models/spindle.cact --create-dirs \
-  https://github.com/JNbot-app/Spindle/releases/latest/download/spindle.cact
-```
-
-The engine needs CMake and a C++17 compiler; on Linux also OpenBLAS (`apt install libopenblas-dev`).
-
-```python
-from spindle import Spindle
-
-tools = [{
-    "name": "get_weather",
-    "description": "Get the current weather for a city.",
-    "parameters": {"type": "object", "required": ["city"],
-                   "properties": {"city": {"type": "string"}}},
-}]
-
-with Spindle("models/spindle.cact", tools) as model:
-    result = model("What's the weather in Lagos?")
-    print(result["function_calls"])
-    # [{'name': 'get_weather', 'arguments': {'city': 'Lagos'}}]
-    print(result["call_probabilities"])
-```
-
-Or from the command line (`--metrics` adds token counts and timing):
-
-```sh
-spindle run models/spindle.cact --tools examples/tools.json "Set a timer for 10 minutes"
-```
-
-The tool part of the prompt is cached, so repeated requests with the same tools only process the new text.
-Values copied from the request are kept word for word (the copy guard, `copy_margin=4`; `0` turns it off).
-For closed label lists with many labels, enum debiasing (on by default) corrects the model's pull towards a few
-labels, learned from earlier requests. It assumes the labels come up about equally often over time; if one label
-is much more common in your use, turn it off with `debias_enums=False`.
-
-A system prompt with the current date (`Spindle(..., system="Current date and time: 2025-06-02T09:30")`)
-lets the model resolve "tomorrow at noon" and "next Tuesday".
-
-**Faster decoding (decode skip, off by default).** Generated tokens can skip some layers; the prompt still
-runs every layer. `spindle pick-skip model.cact` measures which layers a model can skip, and a short
-`spindle finetune --skip-layers ...` run heals it; run the result with `decode_skip=True` (or `--decode-skip`).
-On an earlier checkpoint this generated about 1.4 times faster for about 1.6 points less.
-[How it works](docs/changes-from-needle-3.md#8-decode-skip).
-
-## Extraction and classification
-
-Both are tool calls. For extraction, give one tool whose parameters are the fields you want. For
-classification, give one tool with an `enum` field. `require_call=True` makes sure the answer is not empty.
-
-```python
-sentiment = [{
-    "name": "classify_sentiment",
-    "description": "Classify the sentiment of a text.",
-    "parameters": {"type": "object", "required": ["sentiment"], "properties": {
-        "sentiment": {"type": "string", "enum": ["positive", "negative", "neutral"]}}},
-}]
-with Spindle("models/spindle.cact", sentiment) as model:
-    model("The battery died after two days.", require_call=True)["function_calls"]
-    # [{'name': 'classify_sentiment', 'arguments': {'sentiment': 'negative'}}]
-```
-
-## Try it in the browser
-
-**[Open the live demo](https://jnbot-app.github.io/Spindle/)**. The engine also compiles to WebAssembly, and
-[`demo/`](demo/) is a static page with tool calling, extraction, sentiment and search-filter examples and a visual
-tool editor. It runs entirely in the page, with the same decoding code as Python. It is published to GitHub Pages by
-[`.github/workflows/demo.yml`](.github/workflows/demo.yml), with the model from the latest release (publish a
-new release first, then push or run the workflow, to update the demo's model). To run it locally:
-
-```sh
-python3 -m http.server 8000     # from the repository root, with models/spindle.cact in place
-# open http://localhost:8000/demo/
-```
-
-## Fine-tune on your own data
-
-Training data is JSONL, one example per line (see [`examples/train.jsonl`](examples/train.jsonl)). An empty
-`answers` list means "no tool fits this request".
-
-```json
-{"query": "Turn the lights off in the kitchen", "tools": [...], "answers": [{"name": "set_lights", "arguments": {"room": "kitchen", "on": false}}]}
-```
-
-```sh
-pip install -e '.[train]'        # JAX on CPU; use '.[cuda]' on NVIDIA GPUs
-spindle finetune --model models/spindle.cact --train train.jsonl --output runs/my-run
-```
-
-The result is `runs/my-run/model.cact`. `spindle finetune -h` lists every setting. A few worth knowing:
-
-- **Rounds.** `--updates-per-round 1000` writes the model and a `progress.json` after every 1,000 updates.
-  A run that stopped continues with `--resume runs/my-run`; `--max-minutes` stops before a round that would
-  not fit in the time left.
-- **Tool-list variety.** Some rows get a varied tool list, and copies of single-call rows without their
-  needed tool are added with "no call" as the answer. This teaches the model to read the list instead of
-  guessing from the request. Tune with `--tool-variety` and `--absent-tools` (0 turns each off).
-- **Decode skip.** `--skip-layers 5-8,10,13,15` trains the model to run without those layers for the
-  tokens it generates, and saves the list in the new file (run it with `--decode-skip`). Get a list for your
-  model with `spindle pick-skip`. Fine-tuning a file that has a list keeps it; `--skip-layers none` drops it.
-- **What is trained.** All weights, with their own learning rates for the backbone, the Monarch MLP factors
-  and a runtime LoRA on attention. The 4-bit weights barely move under fine-tuning, so most of the learning
-  goes into the FP16 parts; [the design notes](docs/changes-from-needle-3.md) explain why.
-
-`spindle build-data --output data/general` rebuilds the general training mix from public datasets (below).
-
-## Benchmarks
-
-`spindle bench` scores a `.cact` model, or any OpenAI-compatible server, on ten public test sets with the
-same cases and scoring. [docs/benchmarks.md](docs/benchmarks.md) describes each set, how every model was
-run, and how to reproduce the numbers.
+To run the benchmark suite yourself:
 
 ```sh
 pip install -e '.[data]'
-spindle bench models/spindle.cact --quick                         # 200 cases per set
-spindle bench my-model --server http://127.0.0.1:8080/v1 --quick  # e.g. llama.cpp's llama-server
+spindle bench models/spindle.cact --quick
+spindle bench my-model --server http://127.0.0.1:8080/v1 --quick
 ```
 
-## The released model
+## Running the browser demo locally
 
-| | |
-| --- | --- |
-| Parent | Needle 3, re-exported with 4-bit weights and converted to Monarch MLP factors (same outputs) |
-| Size | 75 MB file; about 120M parameters, of which 6M are FP16 (Monarch factors and LoRA) |
-| Context | 1024-token attention window by default (`window=`) |
-| Training | 1,000 updates (32k rows, batch 32) from Needle 3, two NVIDIA T4 GPUs, about 2 hours; call / no-call choice distilled from a reasoning-trained teacher |
-| Languages | English |
+The [`demo/`](demo/) directory contains a static web app using the same C++ decoder compiled to WebAssembly. With `models/spindle.cact` downloaded, serve the repository root and open `http://localhost:8000/demo/`:
 
-The training mix, built by `spindle build-data` from public data and templates (no text written by another
-language model):
+```sh
+python3 -m http.server 8000
+```
 
-| Task | Share | Sources |
-| --- | ---: | --- |
-| Tool calling | 45% | [xLAM](https://huggingface.co/datasets/Salesforce/xlam-function-calling-60k), [ToolACE](https://huggingface.co/datasets/Team-ACE/ToolACE), [Glaive v2](https://huggingface.co/datasets/glaiveai/glaive-function-calling-v2), [CLINC150](https://huggingface.co/datasets/clinc/clinc_oos), [Banking77](https://huggingface.co/datasets/PolyAI/banking77), generated requests with relative dates, generated app-style actions (records by URI, files by type, searches, timers), two requests joined into one (about 15% of the rows) |
-| No fitting tool | 15% | [When2Call](https://huggingface.co/datasets/nvidia/When2Call), Glaive, CLINC150 out-of-scope, generated app-style actions, ToolACE, Banking77 |
-| Extraction | 25% | [MASSIVE](https://huggingface.co/datasets/AmazonScience/massive), [Few-NERD](https://huggingface.co/datasets/DFKI-SLT/few-nerd), [Pile-NER](https://huggingface.co/datasets/Universal-NER/Pile-NER-type), [ATIS](https://huggingface.co/datasets/tuetschek/atis), generated records |
-| Classification | 15% | [SST-2](https://huggingface.co/datasets/stanfordnlp/sst2), [TweetEval](https://huggingface.co/datasets/cardiffnlp/tweet_eval), [Emotion](https://huggingface.co/datasets/dair-ai/emotion), [AG News](https://huggingface.co/datasets/fancyzhx/ag_news), Banking77 |
+## Fine-tuning
 
-None of the benchmark sets is in the training mix. Each dataset keeps its own license; check them before
-commercial use.
+Training data uses JSONL with one example per line (see [`examples/train.jsonl`](examples/train.jsonl)). Use the same JSON Schema format for `tools`, and leave `answers` empty when no tool fits:
 
-### Limitations
+```json
+{"query": "Turn the lights off in the kitchen", "tools": [...], "answers": [{"name": "set_lights", "arguments": {"room": "kitchen", "on": false}}]}
+{"query": "What is the capital of Peru?", "tools": [...], "answers": []}
+```
 
-- **Small model, little world knowledge.** Spindle copies values from the request well, but it cannot fill in
-  facts the request does not state (a city's airport code, a file's MIME type).
-- **Long tool lists.** Prompts beyond the 1024-token window push early tools out of view. Short tool
-  descriptions help; so does a larger `window`, at some extra latency.
-- **Several calls in one request.** Requests that need several different calls are the weakest case.
-- **Optional details.** With many optional fields, the model sometimes leaves one out even when the text
-  states it (a price limit next to a colour and a sort order, say). Clear wording ("below 80 euro") helps.
-- **Caution over recall.** The output checks drop calls that the request does not support. That makes the
-  model decline more, sometimes also when a call was wanted. `filters=False` returns every decoded call.
-- **English only.**
+Install the training extras and run fine-tuning (`'.[train]'` installs CPU JAX, use `'.[cuda]'` for NVIDIA GPUs):
 
-## Repository layout
+```sh
+pip install -e '.[train]'
+spindle finetune --model models/spindle.cact --train train.jsonl --output runs/my-run
+```
 
-| Path | What it holds |
-| --- | --- |
-| [`spindle/inference/`](spindle/inference) | Engine binding, output checks, the `Spindle` class |
-| [`spindle/model/`](spindle/model) | The network in JAX/Flax, 4-bit fake quantization, runtime LoRA |
-| [`spindle/training/`](spindle/training) | Data preparation, span attention supervision, the fine-tuning loop |
-| [`spindle/bench/`](spindle/bench) | Benchmark sets, scoring, and the runner behind `spindle bench` |
-| [`spindle/datasets/`](spindle/datasets) | Converters for public datasets and the general training mix |
-| [`spindle/archive.py`](spindle/archive.py) | Reading and writing `.cact` model files |
-| [`native/`](native) | The C++ engine (NEON, AVX2, SSE2 and WebAssembly SIMD kernels) and the decoder (`grammar.cpp`: grammar, copy guard, enum debiasing), shared by Python and the demo |
-| [`demo/`](demo) | The browser demo |
-| [`benchmarks/`](benchmarks) | Benchmark results and the script that draws the charts |
+The output model is saved to `runs/my-run/model.cact`. Run `spindle finetune -h` for all options. Useful flags:
 
-## Acknowledgements
+- `--updates-per-round 1000`: Saves a checkpoint and `progress.json` every 1,000 updates. Resume an interrupted run with `--resume runs/my-run`, or set `--max-minutes` to stop cleanly before a time limit.
+- `--tool-variety` / `--absent-tools`: Varies tool lists across rows and creates negative examples by removing the needed tool, so the model checks the provided tools rather than guessing from the prompt. Set to `0` to disable.
+- `--skip-layers`: Trains the model to skip specific layers during generation (for example `--skip-layers 5-8,10,13,15`). Find good candidate layers for your model with `spindle pick-skip model.cact`. On an earlier checkpoint, skipping layers gave roughly 1.4x faster generation for about 1.6 benchmark points.
+- `spindle build-data --output data/general`: Rebuilds the general public training mix used for the released checkpoint.
 
-Spindle starts from the architecture and weights of [Needle 3](https://github.com/cactus-compute/needle) by
-Cactus Compute, and is trained on the public datasets listed above. Thanks to their authors.
+## Model details and limitations
+
+The released model is fine-tuned from Needle 3 for 1,000 updates (32k rows, batch size 32, roughly two hours on two T4 GPUs), with its call / no-call decisions distilled from a reasoning-trained teacher. The training mix combines public tool-calling, abstention, extraction, and classification datasets (none of which overlap with the benchmark sets). If you use the training mix or rebuild it with `spindle build-data`, check each source dataset's license before commercial use.
+
+Known limitations:
+
+- **Little world knowledge**: Spindle copies values from the prompt reliably, but will not infer unstated facts like airport codes or file MIME types.
+- **Long tool lists**: Prompts exceeding the default 1024-token `window` push earlier tools out of context. Keep tool descriptions concise or raise `window`.
+- **Multiple calls and optional fields**: Requests that require calling several different tools at once are the weakest case, and optional parameters can be skipped when many are defined together. Clear phrasing in the prompt helps.
+- **Conservative defaults**: Output filters drop unsupported calls, which lowers false positives at the cost of some recall. Pass `filters=False` to inspect all raw decoded calls.
+- **English only**.
 
 ## License
 
-Apache 2.0, see [LICENSE](LICENSE) and [NOTICE](NOTICE). The model weights are derived from Needle 3, which
-is also released under Apache 2.0.
+Apache 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE). Model weights are derived from [Needle 3](https://github.com/cactus-compute/needle), also licensed under Apache 2.0.

@@ -1,330 +1,177 @@
 # What changed from Needle 3
 
-Spindle starts from [Needle 3](https://github.com/cactus-compute/needle) by Cactus Compute, a 121M-parameter
-Simple Attention Network for on-device tool calling. The architecture stays almost the same. The changes are
-in three places: the MLP block, how the model is fine-tuned, and the engine that runs it.
+Spindle starts from [Needle 3](https://github.com/cactus-compute/needle) by Cactus Compute, a 121M-parameter Simple Attention Network for on-device tool calling. The core architecture stays mostly the same. The changes are in the MLP blocks, how the model is fine-tuned, and the engine that runs it.
 
 | Area | Needle 3 | Spindle |
 | --- | --- | --- |
-| MLP mixing | Kronecker: one 32×32 matrix shared by all 32 groups | Monarch: one 32×32 matrix per group |
-| Fine-tuning | LoRA on attention, merged into the 4-bit weights at export | Full fine-tune, with a separate rate for the MLP blocks and an unmerged FP16 LoRA |
-| Training loss | Cross-entropy on the answer | Same, plus weights on argument values and no-call answers, plus a span attention loss |
-| Training data | Used as given | Varied tool lists, "no call" rows where the needed tool is missing, and requests that join two calls |
-| Call or no call | Learned from the answers | Also distilled from a teacher that reasons before it decides |
-| Attention window | 256 tokens in the file header | 1024 tokens by default, set at run time (`window`) |
-| Output | Reasoning, then calls | Calls, with an optional reasoning note |
-| Confidence | Learned confidence head | Probability of each call, measured during decoding |
-| Decoding | Grammar-constrained | Same, plus a copy guard and enum debiasing (both on) |
-| Engine | Cactus prebuilt engines | Own C++ CPU engine that reads the new tensors |
+| MLP mixing | Kronecker: one 32x32 matrix shared by all 32 groups | Monarch: one 32x32 matrix per group |
+| Fine-tuning | LoRA on attention, merged into 4-bit weights at export | Full fine-tune, separate rate for MLP blocks, unmerged FP16 LoRA |
+| Training loss | Cross-entropy on the answer | Weighted argument and no-call loss, plus span attention loss |
+| Training data | Used as given | Varied tool lists, missing-tool negatives, and two-call queries |
+| Call or no call | Learned from answers | Also distilled from a reasoning-trained teacher |
+| Attention window | 256 tokens in file header | 1024 tokens by default, configurable at runtime (`window`) |
+| Output | Reasoning, then calls | Calls by default, optional reasoning note |
+| Confidence | Learned confidence head | Per-call token probability measured during decoding |
+| Decoding | Grammar-constrained | Same, plus copy guard and enum debiasing (both on by default) |
+| Engine | Cactus prebuilt engines | Custom C++17 CPU engine for the new tensors |
 
-The numbers below come from development experiments on earlier checkpoints, each against a matched control.
-For the released model against other models, see [benchmarks](benchmarks.md).
+Unless noted otherwise, the ablation numbers below come from development runs on earlier checkpoints against matched controls. For the released model against other models, see [benchmarks](benchmarks.md).
 
-## The finding behind most changes: 4-bit weights do not move
+## Why 4-bit weights do not move
 
-Needle stores almost all weights as 4-bit codes, one per weight, in groups of 128 that share one FP16 scale.
-Training uses a straight-through estimator [4]: the forward pass sees the rounded weights, and the gradient
-updates a full-precision copy. A code only changes when that copy crosses the boundary to the next 4-bit
-level.
+Needle stores almost all weights as 4-bit codes in groups of 128 sharing one FP16 scale. Training uses a straight-through estimator [4]: the forward pass uses rounded weights, while gradients update an FP32 copy. A 4-bit code only flips when the FP32 copy crosses a quantization boundary.
 
-In practice, it never does. After full fine-tunes at learning rate 1e-5, and even at 5e-5, **not one 4-bit code
-had changed**. The nearest boundary was 11 to 460 times farther away than Adam moved the weight during a run.
-Merged LoRA has the same problem: in one run, export changed only 1,100 of 35.9M codes. A teacher-forced check
-showed the LoRA had learned (+0.56 nats on its targets), but the exported model kept none of it (−0.03).
+In practice, it almost never does. After full fine-tunes at learning rates of `1e-5` and even `5e-5`, zero 4-bit codes changed. The nearest quantization boundary was 11 to 460 times farther away than Adam moved any weight during a run. Merged LoRA hits the same wall: in one test, merging changed only 1,100 out of 35.9M codes, wiping out a +0.56 nat teacher-forced gain (the exported model scored -0.03).
 
-Raising the learning rate until codes flip would disturb the whole model. So Spindle moves the learning into
-places where small updates survive: the FP16 tensors. The next two changes do exactly that.
+Cranking the learning rate high enough to flip codes destabilizes the rest of the network. Spindle instead puts trainable capacity into FP16 tensors where small gradient steps actually persist.
 
-## 1. Monarch mixing in the MLP
+## Architecture changes
 
-Needle's MLP block is a Hadamard MLP. It mixes a 1024-wide vector in three stages, and each stage applies a
-pair of 32×32 matrices to 32 groups. Needle 3 calls this "Monarch", but every group shares the same matrix.
-That is the Kronecker special case. A full Monarch matrix [1] gives each group its own matrix.
+### 1. Monarch mixing in the MLP
 
-**Why it makes sense**
+Needle's Hadamard MLP mixes a 1024-wide vector in three stages, applying a pair of 32x32 matrices to 32 groups at each stage. Needle 3 calls this "Monarch", but every group shares the same matrix (the Kronecker special case). A full Monarch matrix [1] gives each group its own 32x32 matrix.
 
-- **Same compute.** Each token still does 32 small 32×32 products per stage, so the multiply count does not
-  change.
-- **Much more freedom.** Weights per layer grow from 25,600 to 216,064. That is 3.8M more in total, or 7.6 MB in
-  FP16 (about 3% of the file).
-- **The new weights are FP16.** They are not 4-bit, so fine-tuning really changes them.
-- **It starts exactly where Needle 3 is.** Copying the shared matrix into every group gives the same function,
-  so the conversion (`spindle monarch`) loses nothing.
+Because each token still performs 32 small 32x32 products per stage, the multiply count stays identical. Parameter count per layer grows from 25,600 to 216,064 (+3.8M total, or +7.6 MB in FP16, about 3% of the file). These weights are stored in FP16 so fine-tuning updates them directly. Copying the shared Needle 3 matrix into every group (`spindle monarch`) initializes the block identically with zero loss at conversion time.
 
-**Evidence.** In a controlled test, the whole model was frozen and only the 20 MLP blocks were trained (1,000
-steps). Held-out loss:
+In a controlled test where only the 20 MLP blocks were trained for 1,000 steps:
 
 | Block | Trainable weights | Extra compute | Held-out NLL |
 | --- | ---: | ---: | ---: |
 | Needle 3 (Kronecker) | 512k | 0 | 0.024 |
-| Kronecker + low-rank path of the same size | 4.3M | about 2× block | 0.018 |
+| Kronecker + low-rank path | 4.3M | ~2x block | 0.018 |
 | **Monarch** | 4.3M | 0 | **0.014** |
 
-Monarch beats a control with the same number of weights, so the gain comes from the structure, not only the
-size. Synthetic tests (memorisation, XOR pairs, routing) pointed the same way.
+Monarch beats an equal-parameter low-rank control, showing the gain comes from the structure rather than size alone. The same test showed the MLP blocks learn best at around `1e-3` while the backbone uses `1e-5`, so `hadamard_lr` defaults to `1e-3`.
 
-**Its own learning rate.** The same test showed that the MLP blocks learn best at about 1e-3, while the
-backbone uses 1e-5. Spindle gives the Hadamard blocks their own rate (`hadamard_lr`, default 1e-3). In full
-fine-tunes this helped a lot by itself, and Monarch added a clear gain on top.
+### 2. Runtime LoRA on attention
 
-## 2. Runtime LoRA on attention
+Because the 4-bit attention weights stay effectively frozen, Spindle adds an unmerged rank-16 LoRA [2] to the `q`, `k`, `v`, gate, and output projections across all 20 layers (2.0M parameters, 4 MB in FP16). Following QLoRA [3], the LoRA weights live next to the quantized base weights and the engine adds `x * A^T * B` at runtime:
 
-Attention weights are 4-bit, so they stay frozen in practice (see above). Spindle adds a rank-16 LoRA [2] to
-the q, k, v, gate and output projections of all 20 layers (2.0M parameters, 4 MB in FP16). Unlike Needle 3's
-LoRA, it is **not merged** into the 4-bit weights. It is stored next to them, and the engine adds `x·Aᵀ·B` to
-each projection at run time. The idea is the same as QLoRA [3]: keep the quantized base, and train a small
-update in higher precision.
+- Training sees the exact same `base + A * B` computation as inference.
+- `lora_lr` defaults to `3e-3`. At `1e-3` the update stayed around 0.6% of the weight norm, while `3e-3` reached about 4%.
+- `B` starts at zero so a fresh LoRA leaves outputs unchanged initially. When fine-tuning a model that already has a LoRA, training resumes from it.
+- Runtime cost is roughly +0.1 ms per token on an Apple M1 (3 to 7%).
 
-- Training sees exactly what the engine computes: the 4-bit weights plus `A·B`.
-- The LoRA uses its own rate (`lora_lr`, default 3e-3). At 1e-3 the update stayed at about 0.6% of the weight
-  size, while at 3e-3 it reached about 4%.
-- B starts at zero, so a new LoRA does not change the model at the start. When the parent model already has a
-  LoRA, training continues it.
-- Cost: about +0.1 ms per token on an Apple M1 (3-7%).
+On its own, the LoRA only gave a small improvement, but it unlocks attention updates needed for span supervision below.
 
-On its own, the LoRA gave only a small gain, because the training data had little left to teach. Its real role
-is to let the attention learn at all, and that matters for the next change.
+### 3. Wider attention window
 
-## 3. Span attention loss
+Needle 3 caps decoder attention at the last 256 tokens. Since tool definitions sit at the start of the prompt, the right tool was often 300 to 500 tokens before the answer and out of sight. In those cases, Needle 3 got only 3 of 49 answers right.
 
-Most remaining errors were copying the wrong part of the query into an argument: a number instead of a name,
-a pronoun, a value from the next clause, or a value cut short. When an argument value appears in the query,
-we know exactly which query tokens it should come from. Spindle uses that as an extra training signal,
-similar in spirit to supervised attention [5] and copy mechanisms [6].
+Raising the window to 1024 without retraining produced the single largest accuracy jump. On prompts longer than 512 tokens with three extra tools, a 512-token window got 17 of 74 right while 1024 got 53 of 74. Since the KV cache is 8-bit, the extra memory footprint is small. Spindle defaults to 1024 and exposes `window` at runtime (`Spindle(..., window=512)` or `--window 512`).
 
-**How it works**
+## Training and data changes
 
-- **Targets.** For every string or number argument that appears in the query, two answer positions are
-  supervised:
-  1. the position that decides to write the argument's key,
-  2. the position that writes the value's first token.
+### 4. Span attention loss
 
-  Each position is found by changing the key or the value in the answer and looking for the first token that
-  changes. Up to 12 targets are used per row.
-- **Loss.** In each of layers 10-19, at least one head should put its attention on the value's span in the
-  query. Per layer, the loss is the best head's −log(attention mass on the span), averaged over the layers and
-  weighted by `span_weight` (default 0.5).
-- **Why "best head".** It leaves the model free to choose which head does the copying, and it does not force
-  every head to look at the same place.
-- **Training only.** The loss changes nothing at inference. Attention can only change through the runtime
-  LoRA, which is why both are always on together.
+Many remaining errors were copy mistakes: picking a number instead of a name, grabbing a pronoun, pulling from the wrong clause, or truncating a value. When an argument value appears in the query, we know which input tokens the model should attend to, similar to supervised attention [5] and copy mechanisms [6].
 
-**What it fixed.** In a matched comparison, it removed most of the copy errors it targeted: wrong spans, values
-from the wrong clause, and cut-off names. A short run left out more arguments, but that went away with full
-training.
+For every string or number argument found in the query (up to 12 targets per row, covering both required and optional arguments), `spindle finetune` supervises two answer positions found by perturbing the key or value:
 
-`spindle finetune` covers numbers, optional arguments and the key position as well as required strings,
-because left-out optional arguments were the next most common error after wrong spans.
+1. the position that decides to write the argument's key
+2. the position that writes the value's first token
 
-## 4. Loss weights
+Across layers 10 to 19, at least one attention head per layer should focus on the value's query span. Each layer's loss is the best head's `-log(attention mass on span)`, averaged over layers and scaled by `span_weight` (default `0.5`). Taking the best head leaves the model free to assign copying to whichever head it chooses without forcing all heads together. This loss is training-only and relies on the runtime LoRA so attention weights can adapt.
 
-Most answer tokens are fixed JSON syntax and tool names. The tokens that decide whether an answer is right
-are the argument values. A "no call" answer is only a few tokens long, so plain cross-entropy barely trains
-that decision. Spindle weights both:
+In matched comparisons, it eliminated most targeted copy errors (wrong spans, cross-clause values, truncated names).
 
-- tokens inside argument values ×4 (`argument_weight`),
-- every token of a row without a call ×20 (`no_call_weight`).
+### 5. Loss weights
 
-The loss is normalised by the total weight of the batch, so these weights change the balance between parts of
-the answer, not the overall learning rate.
+Most tokens in a JSON answer are boilerplate syntax and tool names, while a "no call" answer is only a few tokens long. Plain cross-entropy barely weights either. Spindle scales:
 
-## 4b. Tool-list variety
+- tokens inside argument values by 4x (`argument_weight`)
+- every token in a no-call row by 20x (`no_call_weight`)
 
-In most tool-calling data the tool list is almost fixed for each kind of request. The model can then
-answer from the request alone and never learns to read the list. In our tests, three unrelated tools added
-to a request cost about 7% of the right answers, and with the needed tool removed the model still called a
-tool 60% of the time.
+The batch loss is normalized by total token weight, shifting focus without changing the effective learning rate.
 
-`spindle finetune` therefore edits the training rows (not the validation rows) before training. Both edits
-keep the request text (`spindle/training/tool_lists.py`):
+### 6. Tool-list variety and missing-tool negatives
 
-- **Varied lists** (`tool_variety`, default 0.5): a call row keeps its needed tools, drops some unused ones,
-  gets 1-3 tools from other rows and a new order. The answer stays the same.
-- **Tool-absent rows** (`absent_tools`, default 0.02 × the row count): a copy of a single-call row without
-  its needed tool and with a varied list. The answer is "no call".
+In many datasets, the tool list hardly changes for a given query type, so models memorize query-to-tool shortcuts instead of reading the schemas. Adding three unrelated tools dropped accuracy by about 7%, and removing the needed tool still triggered a call 60% of the time.
 
-Every added tool is a right answer in other rows, so an unfamiliar tool or an unusual list says nothing about
-the answer. Tools that could do the same job as the needed tool (shared name word or a synonym, e.g.
-`send_message` / `send_email`) are never added next to it.
+Before training, `spindle finetune` modifies training rows (leaving validation rows untouched) in `spindle/training/tool_lists.py`:
 
-**Effect.** With the needed tool missing, the model declined 94% of the time (39% before). Varied lists
-alone changed little; the tool-absent rows do the work.
+- **Varied lists (`tool_variety`, default `0.5`)**: Keeps required tools, drops some unused ones, adds 1 to 3 tools sampled from other rows, and shuffles the order. Tools sharing a name word or synonym with the target tool (such as `send_message` and `send_email`) are never added as distractors.
+- **Missing-tool negatives (`absent_tools`, default `0.02` times row count)**: Copies single-call rows, strips out the needed tool, varies the remaining list, and sets the answer to no call.
 
-**Cost.** The model also declines more real requests whose wording a tool never had in training. Give each
-tool several request wordings in your data. If missing a call costs you more than a wrong call, lower
-`absent_tools` or set it to 0.
+This raised the decline rate when the needed tool is absent from 39% to 94% (varied lists alone helped little without missing-tool negatives). The trade-off is higher sensitivity to unfamiliar phrasings, so provide varied request phrasings per tool, or lower `absent_tools` (down to `0`) if missed calls are more costly than false triggers.
 
-## 5. A wider attention window
+### 7. Distilling call decisions from a reasoning teacher
 
-Needle 3 limits decoder attention to the last 256 tokens. Tool definitions come first in the prompt, so with
-several tools the right definition was often 300-500 tokens before the answer, and the model could not see it.
-It then picked a visible tool near the end of the list, or no tool. In those cases only 3 of 49 answers were
-right.
+Models trained to write a short reasoning note before calling tools are better at deciding when to abstain (declining 66% of missing-tool cases vs 45% without notes), but generating reasoning tokens slows down CPU inference and hurt other metrics.
 
-Raising the window to 1024, with no retraining, gave the largest single gain we found. 512 gave the same gain
-at lower latency, and training with the same window added a little more. The KV cache is 8-bit, so the extra memory
-is small.
+Spindle keeps only the decision boundary (`spindle finetune --teacher teacher.cact --distill-weight 1`, in `spindle/training/decision.py`). During fine-tuning, a reasoning-trained teacher evaluates the same prompt and its decline probability serves as a soft target for the single token right after `<tool_call>` (`[]` for no call vs `[{"` for a call). Nothing else from the teacher is copied, adding roughly 12% to training time.
 
-With five or six tools, prompts pass 512 tokens again and the needed tool falls out of view. In our tests,
-on prompts longer than 512 tokens with three extra tools, 512 kept 17 of 74 right answers and 1024 kept 53,
-with no retraining. So Spindle runs with a window of 1024 by default (the local attention width the model
-was built with), and the window can be set at run time: `Spindle(..., window=512)` or `--window 512`.
+On matched 200-case runs, distillation improved When2Call from 60.5 to 68.0, tool-removed accuracy from 45.5 to 48.0, and the 10-benchmark mean from 45.2 to 46.5.
 
-## 6. Calls only, and a per-call probability
+### 8. Two-call combined requests
 
-**Reasoning is optional.** Needle 3 writes a short reasoning note before its calls. Spindle lets a model do that when it prefers to (`reasoning=True`) and can train with notes built from the answers (`spindle build-data --reasoning`); rows without a note train calls only.
-Reasoning costs extra tokens on a CPU, and in our tests forcing it lowered call accuracy.
+Because most public rows expect a single call, the model tended to stop after one call on multi-part queries. `spindle build-data --combined 0.15` joins pairs of single-call rows with `" and "` and combines their answers. Training with ~15% combined rows raised the tool-removed score from 46.0 to 53.5 and the 10-set mean from 48.6 to 49.5 (Mobile Actions shifted from 88 to 86, within noise).
 
-**Per-call probability.** Needle 3 reports a confidence from a learned head, and a local fine-tune leaves that
-head uncalibrated. Spindle instead measures each call while decoding: the mean probability of its tokens,
-renormalised over the tokens the grammar allows. This needs no training, so it stays valid after every
-fine-tune, and it scores each call separately. In our tests it told right calls from wrong ones with an AUC of
-0.88. Calls below `min_call_probability` are held back.
+## Decoding and inference engine
 
-The output filters (grounding, negation, duplicates) follow Needle's output contract, rewritten without
-domain-specific rules.
+### 9. Custom C++17 engine
 
-## 7. Inference engine
+Needle 3's prebuilt engines expect shared 2D mixing matrices and have no runtime LoRA support, so Spindle ships a ~4,000-line C++17 engine in `native/`:
 
-Needle 3's prebuilt engines expect shared 2D mixing matrices and have no LoRA block, so they cannot run this
-model. Spindle has its own small engine (C++17, about 4,000 lines, in `native/`):
+- **In-place loading**: Memory-maps `.cact` files and reads Monarch factors and LoRA weights directly in FP16. Also opens Needle 3 `.cact` files by widening sub-4-bit weights (Needle 3 ships with 2-bit weights) to the 4-bit layout on load.
+- **Quantized kernels**: Implements 4-bit kernels for ARM NEON (with and without dotprod), AVX2, SSE2, and scalar C++, using Accelerate on Apple and OpenBLAS elsewhere for prefill.
+- **Training parity**: Runs 8-bit activations and an 8-bit KV cache matching the simulated quantization in JAX. Across full prompts and answers, engine predictions match JAX token for token.
+- **Prompt formatting and normalization**: Keeps tool schemas as written (converting tool names to `snake_case`), normalizes system timestamps into the short training format (`date: 2024-06-06 Thu 09:58`), and restores exact input spelling when a text argument differs from a query span only in case or punctuation (`03 1234-5678` becomes `(03) 1234-5678`).
+- **Tool-prefix caching**: Caches KV state immediately after the tool definitions and always aligns prefill chunks to end at the tool boundary. Cache hits produce bit-for-bit identical results to cold runs while skipping tool prefill (`metrics['cached_prompt_tokens']`).
+- **Threading**: Prefill uses half the performance cores (capped at 4), with output independent of thread count.
 
-- **Reads the file in place.** It maps the `.cact` file into memory. The Monarch factors and the LoRA are read
-  as FP16 straight from the file.
-- **Fast 4-bit kernels** for ARM NEON (with and without dot-product), AVX2, SSE2 and plain C++. Prefill uses
-  Accelerate on Apple and OpenBLAS elsewhere.
-- **Same rounding as training.** It uses 8-bit activations and an 8-bit KV cache, the same rounding the
-  training graph simulates. Across a full prompt and answer, its predicted token matched the JAX model at every
-  position.
-- **Grammar-constrained decoding** [7] from the tools' JSON Schemas, so every answer parses and every call
-  fits its schema. The same pass computes the per-call probability.
-- **Tool-prefix cache.** The tool list comes first in the prompt and is the same for every request with the
-  same tools. The engine keeps its state right after the tool part and reuses it when the next prompt
-  starts with the same tokens. Prefill chunks always end at the tool part, so a cache hit and a miss give
-  bit-for-bit the same output; only the prefill of the tool list is skipped. `metrics['cached_prompt_tokens']` shows how much was reused.
+Monarch mixing adds about 15% to decode latency per token compared to shared matrices due to less regular memory access.
 
-- **Decode skip.** When turned on, generated tokens skip a list of layers (section 8). Off by default.
-- **Reads Needle 3 files too.** Weights stored with fewer than 4 bits (the shipped Needle 3 model uses
-  2) are widened to the 4-bit layout when the file is loaded, so they use the same kernels.
-- **The prompt the model was trained on.** Tools are shown as written (only names become snake_case), and
-  a timestamp in the system prompt becomes the short date fact used in training (`date: 2024-06-06 Thu 09:58`).
-- **Exact copies.** A text argument that differs from a passage of the request only in punctuation or case
-  takes the request's spelling (`03 1234-5678` becomes `(03) 1234-5678`).
-- **Small worker team.** Prefill runs its per-token loops on a few threads (half the performance cores, at
-  most four); results do not depend on the thread count.
+### 10. Calls by default and per-call probability
 
-Monarch costs about 15% more decode time per token than shared matrices. Its arithmetic is the same, but the
-memory access is less regular.
+Spindle generates calls directly by default. Reasoning notes can still be enabled (`reasoning=True` or `spindle build-data --reasoning`), though forcing notes reduced call accuracy on CPU benchmarks.
 
-## 8. Decode skip
+Needle 3 uses a learned confidence head, which drifts out of calibration after fine-tuning. Spindle replaces it with the mean token probability of each decoded call, renormalized over grammar-valid tokens. This requires no training, scores each call individually, and achieved 0.88 AUC separating correct calls from incorrect ones. Calls below `min_call_probability` are filtered out alongside Needle-style grounding, negation, and duplicate checks.
 
-Generating the answer is one token at a time, and each token runs all 20 layers. Not every layer is needed
-for that. Decode skip lets generated tokens skip a list of layers. It is off unless you turn it on, and it
-assumes nothing about which layers matter: each model gets its own list, measured on that model.
+### 11. Copy guard and enum debiasing
 
-- **Only generated tokens skip.** The prompt (tools and request) always runs every layer, so the model
-  reads the full input with all of its depth. The last layer (the read-out) never skips.
-- **Off by default, switchable at any time.** `Spindle(..., decode_skip=True)` or `--decode-skip` uses the
-  list stored in the file; you can also name layers (`decode_skip='5-8,10'`) or turn it off again with
-  `model.engine.set_decode_skip(None)`, even between requests that share the cached prompt.
-- **Finding the list: `spindle pick-skip model.cact`.** The full model answers some requests; then each
-  candidate list replays those answers token by token with its layers skipped, and costs how much less
-  likely the model's own answer becomes. Layers are added one at a time, cheapest first. It needs no labels
-  and takes a few minutes on a laptop. Use `--data` for requests from your own task.
-- **Healing: `spindle finetune --skip-layers ...`.** In fine-tuning, answer tokens skip the same layers as
-  in the engine: a skipping token keeps its stream unchanged, writes no keys or values in that layer (later
-  tokens do not see it there), and gives zeros to that layer's q/k/v taps. A short run lets the other layers
-  take over the work. The list is saved in header fields 45-46 of the new `.cact` file (a bit mask), and
-  later fine-tunes of that file keep it (`--skip-layers none` drops it).
+Both rules run token by token right after grammar constraints [7] inside `native/grammar.cpp`, so Python and the browser WebAssembly demo behave identically:
 
-**Measured on an earlier Spindle checkpoint.** `pick-skip` and a learned per-token router (an earlier
-experiment) found lists of equal cost: the router dropped layers 5, 6, 7, 8, 10, 13 and 15, and the picker
-chose 1, 3, 5, 8, 13, 15 and 18 (0.063 vs 0.064 extra loss per token, 40 requests). Skipping every other
-middle layer (4, 6, ..., 16) cost 0.30, and in a full test lost about 9 points, mostly on picking the right
-tool. Which layers are skipped matters a lot, and it differs per model, which is why the list is measured.
+- **Copy guard (`copy_margin=4`, `0` disables)**: Small models sometimes start copying a phrase from the request and paraphrase halfway through (`"Café Grano de Oro at 25 Calle del Prado"` becomes `"... Oro 25 Calle del Prado"`). If the string generated so far matches a substring of the query and the top token diverges from it, the copy guard substitutes the token that continues the query match if it falls within `4` in log probability. Ending the string is never blocked, and values absent from the query (such as dates or codes) are untouched. This raised Mobile Actions from 76 to 82 with no regressions elsewhere.
+- **Enum debiasing (`debias_enums=True`, disable via `debias_enums=False` or `--no-debias-enums`)**: On large closed label sets (like 14-way topic classification), small models skew toward a handful of labels regardless of input. After 8 requests sharing the same field and enum values, this tracks running mean label probabilities and picks by `p(label) / mean p(label)`. It requires no ground-truth labels, assuming labels appear roughly evenly over time (disable it if one label dominates your traffic). On DBpedia, it raised accuracy from 28.0 to 46.5.
 
-Healing that checkpoint for 1,000 updates on the general mix with layers 5, 6, 7, 8, 10, 13 and 15 skipped
-gave this, on 400 cases (80 each from Mobile Actions, DroidCall, DSTC8, BFCL and When2Call), free generation
-with the grammar, one Apple M1 laptop:
+### 12. Decode skip
 
-| Model | Mean | Mobile Actions | DroidCall | DSTC8 | BFCL | When2Call | Decode time per token |
+Each generated token normally passes through all 20 layers. Decode skip lets generation skip a specified subset of layers while still running all 20 layers on the prompt (and never skipping the final readout layer). It is off by default and toggleable per call, even between cached requests (`Spindle(..., decode_skip=True)`, `--decode-skip`, `decode_skip='5-8,10'`, or `model.engine.set_decode_skip(None)`).
+
+To avoid guessing which layers matter, `spindle pick-skip model.cact` (with optional `--data` for task queries) generates answers with the full model, replays them token by token while dropping candidate layers, and greedily builds the lowest-cost skip list in a few minutes with no labels needed.
+
+`spindle finetune --skip-layers ...` then heals the remaining layers: skipped answer tokens keep their residual stream unchanged, skip writing KV entries, and zero out their `q`/`k`/`v` taps. The skip mask is saved in header fields 45 and 46 of the `.cact` file and preserved in subsequent fine-tunes (`--skip-layers none` clears it).
+
+On an earlier checkpoint healed for 1,000 updates with layers `5, 6, 7, 8, 10, 13, 15` skipped (evaluated across 400 free-generation cases on an Apple M1, 80 each from Mobile Actions, DroidCall, DSTC8, BFCL, and When2Call):
+
+| Model | Mean | Mobile Actions | DroidCall | DSTC8 | BFCL | When2Call | Decode ms / token |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | Checkpoint, all layers | 53.7 | 78.8 | 36.2 | 43.7 | 48.8 | 61.2 | 2.93 ms |
 | Healed copy, decode skip on | 52.1 | 71.2 | 31.2 | 41.6 | 47.5 | 68.8 | 2.11 ms (1.39x) |
 
-The two give the same result on 339 of 400 cases; the healed copy gets 27 of the others right and 34 wrong,
-a difference within noise for this many cases (McNemar p = 0.44). The largest drop is on Mobile Actions;
-When2Call goes up. No decode-skip model ships with the current release: run `pick-skip` and a short
-`--skip-layers` fine-tune on the released model to make one.
-
-## 9. Learning when to call from a teacher that reasons
-
-A model that writes a short reasoning note first ("No tool available ...", or a tool name and why) is
-better at one thing: deciding whether to call at all. In our tests such a model declined 66% of the cases
-where the needed tool was missing, against 45% for the same training without notes. But the notes cost tokens
-on a CPU, and they made its other answers worse.
-
-Spindle keeps only that decision. During fine-tuning, a reasoning-trained teacher reads the same prompt and
-its chance of declining becomes a soft target for one token of the student: the first token after
-`<tool_call>`, which is `[]` (no call) or `[{"` (a call). Nothing else of the teacher is copied, so the
-student keeps writing calls only (`spindle finetune --teacher teacher.cact --distill-weight 1`,
-`spindle/training/decision.py`). It adds about 12% to the training time.
-
-**Effect** (matched runs, 200 cases per set): When2Call 60.5 → 68.0, tool removed 45.5 → 48.0, mean of all ten
-sets 45.2 → 46.5. A higher distill weight did not move declines further.
-
-## 10. Requests with two calls
-
-Most training requests need one call, so the model tended to stop after the first call of a request that
-asked for two things. `spindle build-data --combined 0.15` joins two single-call requests from the mix into
-one ("... and ..."), with both calls as the answer. The released model trained on about 15% of such rows.
-In a matched pair of runs (both from Needle 3), the joined rows raised the tool-removed score from 46 to
-53.5 and the mean of all ten sets from 48.6 to 49.5; Mobile Actions moved from 88 to 86 (within noise).
-
-## 11. Copy guard and enum debiasing
-
-Two small decoding rules, applied token by token after the grammar. Both live with the grammar in the C++
-decoder (`native/grammar.cpp`), so Python and the browser demo decode the same way:
-
-- **Copy guard** (on, `copy_margin=4`). A small model often starts copying a phrase from the request and
-  rewords it halfway ("Café Grano de Oro at 25 Calle del Prado" → "... Oro 25 Calle del Prado"). When the
-  string written so far appears in the request and the chosen token breaks the copy, the token that continues
-  the request is taken instead, if the model finds it almost as likely (within 4 in log probability). Ending
-  the string is never blocked, and values that are not in the request (dates, codes) are left alone. It
-  raised Mobile Actions from 76 to 82 with no change elsewhere. `copy_margin=0` turns it off.
-- **Enum debiasing** (on, `debias_enums=False` / `--no-debias-enums` turns it off). With many labels (a 14-way topic
-  list), a small model favours a few of them for almost any input. This option records the model's label
-  probabilities over earlier requests with the same field and labels, and after 8 requests picks by
-  p(label) / mean p(label). It needs no labels, but it assumes the labels come up about equally often over
-  time; when one label is much more common in your use, turn it off. On DBpedia it raises the score from 28.0 to 46.5.
+Both models agreed on 339 of 400 cases, with 27 fixed and 34 broken (McNemar `p = 0.44`). Naive skipping of every other middle layer (`4, 6, ..., 16`) lost roughly 9 points, showing that model-specific layer selection matters. No decode-skip checkpoint ships with the current release, so run `pick-skip` and a short `--skip-layers` fine-tune on the released weights if you want one.
 
 ## Costs at a glance
 
 | Change | Size | Decode speed |
 | --- | --- | --- |
-| Monarch factors | +7.6 MB | about 15% slower |
-| Runtime LoRA | +4 MB | 3-7% slower |
-| 1024-token window | KV cache ×4 (8-bit) | longer prompts cost a bit more |
-| Tool-prefix cache | one copy of the cached state | prefill of the tool list skipped on repeat requests |
-| Decode skip (off by default; needs a healed model) | none | 1.39x faster per generated token, about -1.6 points (earlier checkpoint) |
-| Span loss, loss weights | none | none |
-| Teacher decisions, two-call rows | none | none (training about 12% slower) |
-| Copy guard, enum debiasing | none | negligible |
+| Monarch factors | +7.6 MB | ~15% slower |
+| Runtime LoRA | +4 MB | 3 to 7% slower |
+| 1024-token window | 4x KV cache (8-bit) | Slight prefill cost on long prompts |
+| Tool-prefix cache | One copy of cached KV state | Skips tool prefill on repeat requests |
+| Decode skip (off by default, needs healed weights) | None | 1.39x faster per generated token (~1.6 pts drop on earlier checkpoint) |
+| Span loss, loss weights | None | None |
+| Teacher distillation, two-call rows | None | None (~12% slower training) |
+| Copy guard, enum debiasing | None | Negligible |
 
 ## References
 
-1. T. Dao et al. *Monarch: Expressive Structured Matrices for Efficient and Accurate Training.* ICML 2022.
-   [arXiv:2204.00595](https://arxiv.org/abs/2204.00595)
-2. E. J. Hu et al. *LoRA: Low-Rank Adaptation of Large Language Models.* ICLR 2022.
-   [arXiv:2106.09685](https://arxiv.org/abs/2106.09685)
-3. T. Dettmers et al. *QLoRA: Efficient Finetuning of Quantized LLMs.* NeurIPS 2023.
-   [arXiv:2305.14314](https://arxiv.org/abs/2305.14314)
-4. Y. Bengio, N. Léonard, A. Courville. *Estimating or Propagating Gradients Through Stochastic Neurons for
-   Conditional Computation.* 2013. [arXiv:1308.3432](https://arxiv.org/abs/1308.3432)
-5. L. Liu et al. *Neural Machine Translation with Supervised Attention.* COLING 2016.
-   [arXiv:1609.04186](https://arxiv.org/abs/1609.04186)
-6. J. Gu et al. *Incorporating Copying Mechanism in Sequence-to-Sequence Learning.* ACL 2016.
-   [arXiv:1603.06393](https://arxiv.org/abs/1603.06393)
-7. S. Geng et al. *Grammar-Constrained Decoding for Structured NLP Tasks without Finetuning.* EMNLP 2023.
-   [arXiv:2305.13971](https://arxiv.org/abs/2305.13971)
+1. T. Dao et al. *Monarch: Expressive Structured Matrices for Efficient and Accurate Training.* ICML 2022. [arXiv:2204.00595](https://arxiv.org/abs/2204.00595)
+2. E. J. Hu et al. *LoRA: Low-Rank Adaptation of Large Language Models.* ICLR 2022. [arXiv:2106.09685](https://arxiv.org/abs/2106.09685)
+3. T. Dettmers et al. *QLoRA: Efficient Finetuning of Quantized LLMs.* NeurIPS 2023. [arXiv:2305.14314](https://arxiv.org/abs/2305.14314)
+4. Y. Bengio, N. Léonard, A. Courville. *Estimating or Propagating Gradients Through Stochastic Neurons for Conditional Computation.* 2013. [arXiv:1308.3432](https://arxiv.org/abs/1308.3432)
+5. L. Liu et al. *Neural Machine Translation with Supervised Attention.* COLING 2016. [arXiv:1609.04186](https://arxiv.org/abs/1609.04186)
+6. J. Gu et al. *Incorporating Copying Mechanism in Sequence-to-Sequence Learning.* ACL 2016. [arXiv:1603.06393](https://arxiv.org/abs/1603.06393)
+7. S. Geng et al. *Grammar-Constrained Decoding for Structured NLP Tasks without Finetuning.* EMNLP 2023. [arXiv:2305.13971](https://arxiv.org/abs/2305.13971)
 8. Cactus Compute. *Needle 3.* [github.com/cactus-compute/needle](https://github.com/cactus-compute/needle)
