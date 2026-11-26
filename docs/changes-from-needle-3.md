@@ -113,7 +113,7 @@ Because most public rows expect a single call, the model tended to stop after on
 
 Needle 3's prebuilt engines expect shared 2D mixing matrices and have no runtime LoRA support, so Spindle ships a ~4,000-line C++17 engine in `native/`:
 
-- **In-place loading**: Memory-maps `.cact` files and reads Monarch factors and LoRA weights directly in FP16. Also opens Needle 3 `.cact` files by widening sub-4-bit weights (Needle 3 ships with 2-bit weights) to the 4-bit layout on load.
+- **In-place loading**: Memory-maps `.cact` files and reads Monarch factors and LoRA weights directly in FP16. Also opens Needle 3 `.cact` files (2-bit weights): 2-bit codes are read in place by native 2-bit kernels on ARM (other CPUs widen a few rows at a time), so they need half the memory of 4-bit.
 - **Quantized kernels**: Implements 4-bit kernels for ARM NEON (with and without dotprod), AVX2, SSE2, and scalar C++, using Accelerate on Apple and OpenBLAS elsewhere for prefill.
 - **Training parity**: Runs 8-bit activations and an 8-bit KV cache matching the simulated quantization in JAX. Across full prompts and answers, engine predictions match JAX token for token.
 - **Prompt formatting and normalization**: Keeps tool schemas as written (converting tool names to `snake_case`), normalizes system timestamps into the short training format (`date: 2024-06-06 Thu 09:58`), and restores exact input spelling when a text argument differs from a query span only in case or punctuation (`03 1234-5678` becomes `(03) 1234-5678`).

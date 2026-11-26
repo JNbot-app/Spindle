@@ -40,68 +40,145 @@ struct NeonOps {
     static void butterfly(float *a,float *b) { auto x=vld1q_f32(a),y=vld1q_f32(b);vst1q_f32(a,vaddq_f32(x,y));vst1q_f32(b,vsubq_f32(x,y)); }
 };
 
-// The integer projection of kernel_integer, with the per-group reduction of four rows done in
-// one vector. Each lane runs the scalar formula, so the output bits are the same.
+// Int8 weights of group g read straight from each layout: the 64 even weights (4 vectors) and
+// the 64 odd ones. They match what lookup_i8 gives for the same weights as nibbles.
+struct NibbleWeights {
+    int8x16_t table; size_t stride;
+    void operator()(const uint8_t *row,size_t g,int8x16_t even[4],int8x16_t odd[4]) const {
+        for(size_t j=0;j<4;++j) {
+            const auto codes=vld1q_u8(row+g*64+j*16);
+            even[j]=vqtbl1q_s8(table,vandq_u8(codes,vdupq_n_u8(15)));
+            odd[j]=vqtbl1q_s8(table,vshrq_n_u8(codes,4));
+        }
+    }
+};
+// A nibble of an archive 2-bit byte holds an even and an odd weight: low[n] is the even one's
+// value, high[n] the odd one's. So 16 bytes give 64 weights with only two bit operations, in the
+// order of crumb_activations: even weights 0,2,..,30 then 1,3,..,31, then the same from 32.
+struct CrumbWeights {
+    int8x16_t low, high; size_t stride;
+    CrumbWeights(const int8_t *book,size_t stride_) : stride(stride_) {
+        int8_t l[16],h[16];
+        for(size_t n=0;n<16;++n) { l[n]=book[n&3]; h[n]=book[n>>2]; }
+        low=vld1q_s8(l); high=vld1q_s8(h);
+    }
+    void operator()(const uint8_t *row,size_t g,int8x16_t even[4],int8x16_t odd[4]) const {
+        for(size_t part=0;part<2;++part) {
+            const auto codes=vld1q_u8(row+g*32+part*16), a=vandq_u8(codes,vdupq_n_u8(15)), b=vshrq_n_u8(codes,4);
+            even[2*part]=vqtbl1q_s8(low,a); even[2*part+1]=vqtbl1q_s8(low,b);
+            odd[2*part]=vqtbl1q_s8(high,a); odd[2*part+1]=vqtbl1q_s8(high,b);
+        }
+    }
+};
+// Int8 activations reordered to match CrumbWeights. Integer sums do not depend on the order,
+// so the output bits are the same.
+inline IntegerInput crumb_activations(const Tensor &t,const IntegerInput &input) {
+    thread_local std::vector<int8_t> buffer;
+    buffer.resize(t.padded);
+    for(size_t k=0;k<t.padded;k+=32) {
+        const int8x16_t a=vld1q_s8(input.activations+k), b=vld1q_s8(input.activations+k+16);
+        vst1q_s8(buffer.data()+k,vuzp1q_s8(a,b));
+        vst1q_s8(buffer.data()+k+16,vuzp2q_s8(a,b));
+    }
+    IntegerInput out=input;
+    out.activations=buffer.data();
+    return out;
+}
+// The integer projection of kernel_integer for NR rows at once, the per-group reduction of four
+// rows done in one vector. Each lane runs the scalar formula, so the output bits are the same.
+template<class Ops,size_t NR,class Weights>
+inline void neon_integer_rows(const Tensor &t,const IntegerInput &input,const Weights &weights,
+                              size_t row,float *out) {
+    const size_t groups=t.padded/128, half=t.padded/2;
+    const uint8_t *codes=t.data+row*weights.stride;
+    const float *norms=t.values.data()+row*groups;
+    float32x4_t sum=vdupq_n_f32(0.f);
+    for(size_t g=0;g<groups;++g) {
+        int32x4_t even[4],odd[4];
+        for(size_t ri=0;ri<4;++ri) even[ri]=odd[ri]=vdupq_n_s32(0);
+        int8x16_t ev[4],od[4];
+        for(size_t j=0;j<4;++j) {
+            ev[j]=vld1q_s8(input.activations+g*64+j*16);
+            od[j]=vld1q_s8(input.activations+half+g*64+j*16);
+        }
+        for(size_t ri=0;ri<NR;++ri) {
+            int8x16_t we[4],wo[4];
+            weights(codes+ri*weights.stride,g,we,wo);
+            for(size_t j=0;j<4;++j) {
+                even[ri]=Ops::dot_acc(even[ri],we[j],ev[j]);
+                odd[ri]=Ops::dot_acc(odd[ri],wo[j],od[j]);
+            }
+        }
+        const int32x4_t e=vpaddq_s32(vpaddq_s32(even[0],even[1]),vpaddq_s32(even[2],even[3]));
+        const int32x4_t o=vpaddq_s32(vpaddq_s32(odd[0],odd[1]),vpaddq_s32(odd[2],odd[3]));
+        const float32x4_t value=vaddq_f32(vmulq_n_f32(vcvtq_f32_s32(e),input.scales[g*2]),
+                                          vmulq_n_f32(vcvtq_f32_s32(o),input.scales[g*2+1]));
+        float norm[4]={};
+        for(size_t ri=0;ri<NR;++ri) norm[ri]=norms[ri*groups+g];
+        sum=vaddq_f32(sum,vmulq_f32(value,vld1q_f32(norm)));
+    }
+    float result[4];
+    vst1q_f32(result,sum);
+    std::copy_n(result,NR,out);
+}
+template<class Ops,class Weights>
+inline void neon_integer_layout(const Tensor &t,const IntegerInput &input,const Weights &weights,
+                                size_t begin,size_t rows,float *out) {
+    size_t r=0;
+    for(;r+4<=rows;r+=4) neon_integer_rows<Ops,4>(t,input,weights,begin+r,out+r);
+    for(;r<rows;++r) neon_integer_rows<Ops,1>(t,input,weights,begin+r,out+r);
+}
 template<class Ops>
 void neon_integer(const Tensor &t, const IntegerInput &input, size_t begin, size_t rows, float *out) {
-    const auto table=Ops::table_i8(input.book);
-    const size_t groups=t.padded/128, half=t.padded/2;
-    size_t r=0;
-    for(;r+4<=rows;r+=4) {
-        const uint8_t *codes=t.data+(begin+r)*half;
-        const float *norms=t.values.data()+(begin+r)*groups;
-        float32x4_t sum=vdupq_n_f32(0.f);
-        for(size_t g=0;g<groups;++g) {
-            int32x4_t even[4],odd[4];
-            for(size_t ri=0;ri<4;++ri) even[ri]=odd[ri]=vdupq_n_s32(0);
-            for(size_t k=0;k<64;k+=16) {
-                const int8x16_t ev=vld1q_s8(input.activations+g*64+k), od=vld1q_s8(input.activations+half+g*64+k);
-                for(size_t ri=0;ri<4;++ri) {
-                    int8x16_t low,high;
-                    Ops::lookup_i8(table,codes+ri*half+g*64+k,low,high);
-                    even[ri]=Ops::dot_acc(even[ri],low,ev);
-                    odd[ri]=Ops::dot_acc(odd[ri],high,od);
-                }
-            }
-            const int32x4_t e=vpaddq_s32(vpaddq_s32(even[0],even[1]),vpaddq_s32(even[2],even[3]));
-            const int32x4_t o=vpaddq_s32(vpaddq_s32(odd[0],odd[1]),vpaddq_s32(odd[2],odd[3]));
-            const float32x4_t value=vaddq_f32(vmulq_n_f32(vcvtq_f32_s32(e),input.scales[g*2]),
-                                              vmulq_n_f32(vcvtq_f32_s32(o),input.scales[g*2+1]));
-            const float norm[4]={norms[g],norms[groups+g],norms[2*groups+g],norms[3*groups+g]};
-            sum=vaddq_f32(sum,vmulq_f32(value,vld1q_f32(norm)));
-        }
-        vst1q_f32(out+r,sum);
+    const auto table=vld1q_s8(input.book);
+    switch(t.layout) {
+    case Layout::nibbles: return neon_integer_layout<Ops>(t,input,NibbleWeights{table,t.row_bytes()},begin,rows,out);
+    case Layout::crumbs:
+        return neon_integer_layout<Ops>(t,crumb_activations(t,input),CrumbWeights(input.book,t.row_bytes()),begin,rows,out);
     }
-    for(;r<rows;++r) integer_rows<Ops,1>(t,input,table,begin+r,out+r);
 }
 
 // Decode sixteen packed bytes at a time with byte-wise codebook tables. A
 // structure store interleaves the four FP32 bytes without scalar gathers.
+inline uint8x16x4_t float_table(const float *book,float scale,bool scaled) {
+    float values[16];
+    for(size_t i=0;i<16;i+=4)
+        vst1q_f32(values+i,scaled ? vmulq_n_f32(vld1q_f32(book+i),scale) : vld1q_f32(book+i));
+    return vld4q_u8(reinterpret_cast<const uint8_t *>(values));
+}
+inline void store_lookup(float *out,const uint8x16x4_t &table,uint8x16_t index) {
+    uint8x16x4_t bytes;
+    for(size_t i=0;i<4;++i) bytes.val[i]=vqtbl1q_u8(table.val[i],index);
+    vst4q_u8(reinterpret_cast<uint8_t *>(out),bytes);
+}
 inline void neon_decode(const Tensor &t, size_t begin, size_t rows, float *weights, bool scaled) {
     const size_t half=t.padded/2, groups=t.padded/128;
-    const auto unscaled=vld4q_u8(reinterpret_cast<const uint8_t *>(t.book.data()));
-    for(size_t r=0;r<rows;++r)
-        for(size_t g=0;g<groups;++g) {
-            auto table=unscaled;
-            if(scaled) {
-                float book[16];
-                const float scale=t.values[(begin+r)*groups+g];
-                for(size_t i=0;i<16;i+=4)
-                    vst1q_f32(book+i,vmulq_n_f32(vld1q_f32(t.book.data()+i),scale));
-                table=vld4q_u8(reinterpret_cast<const uint8_t *>(book));
-            }
-            for(size_t k=0;k<64;k+=16) {
-                const auto codes=vld1q_u8(t.data+(begin+r)*half+g*64+k);
-                const auto low=vandq_u8(codes,vdupq_n_u8(15)), high=vshrq_n_u8(codes,4);
-                uint8x16x4_t even,odd;
-                for(size_t i=0;i<4;++i) {
-                    even.val[i]=vqtbl1q_u8(table.val[i],low);
-                    odd.val[i]=vqtbl1q_u8(table.val[i],high);
+    if(t.layout==Layout::crumbs) {
+        for(size_t r=0;r<rows;++r)
+            for(size_t g=0;g<groups;++g) {
+                const auto table=float_table(t.book.data(),t.values[(begin+r)*groups+g],scaled);
+                for(size_t part=0;part<2;++part) { // bytes 0-15 hold weights 0-63, bytes 16-31 the rest
+                    const auto codes=vld1q_u8(t.data+(begin+r)*t.row_bytes()+g*32+part*16), three=vdupq_n_u8(3);
+                    const auto e0=vandq_u8(codes,three), e1=vandq_u8(vshrq_n_u8(codes,4),three);
+                    const auto o0=vandq_u8(vshrq_n_u8(codes,2),three), o1=vshrq_n_u8(codes,6);
+                    float *out=weights+r*t.padded+g*64+part*32;
+                    store_lookup(out,table,vzip1q_u8(e0,e1)); store_lookup(out+16,table,vzip2q_u8(e0,e1));
+                    store_lookup(out+half,table,vzip1q_u8(o0,o1)); store_lookup(out+half+16,table,vzip2q_u8(o0,o1));
                 }
-                float *out=weights+r*t.padded+g*64+k;
-                vst4q_u8(reinterpret_cast<uint8_t *>(out),even);
-                vst4q_u8(reinterpret_cast<uint8_t *>(out+half),odd);
             }
-        }
+        return;
+    }
+    nibble_rows(t,begin,rows,[&](const uint8_t *data,size_t first,size_t count) {
+        for(size_t r=0;r<count;++r)
+            for(size_t g=0;g<groups;++g) {
+                const auto table=float_table(t.book.data(),t.values[(first+r)*groups+g],scaled);
+                for(size_t k=0;k<64;k+=16) {
+                    const auto codes=vld1q_u8(data+r*half+g*64+k);
+                    float *out=weights+(first-begin+r)*t.padded+g*64+k;
+                    store_lookup(out,table,vandq_u8(codes,vdupq_n_u8(15)));
+                    store_lookup(out+half,table,vshrq_n_u8(codes,4));
+                }
+            }
+    });
 }
 }

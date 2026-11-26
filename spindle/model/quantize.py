@@ -1,14 +1,18 @@
 """Fake quantization, so training sees the same numbers as the native engine.
 
 * Activations and the KV cache: symmetric 8-bit per row (A8 / KV8).
-* Weight matrices: CQ4. Each group of 128 inputs is rotated by a Hadamard matrix, split into
-  a norm (FP16) and a unit direction, and every direction value is snapped to a 16-level
-  codebook. Training uses a straight-through estimator: the forward pass sees the 4-bit
-  weights, the gradient flows to the FP32 weights.
+* Weight matrices: CQ at 4 or 2 bits. Each group of 128 inputs is rotated by a Hadamard matrix,
+  split into a norm (FP16) and a unit direction, and every direction value is snapped to a
+  16-level (4-bit) or 4-level (2-bit) codebook. Or E8 (about 2 bits): blocks of 8 rotated values
+  snap to E8 lattice points with a fitted gain per group (spindle.lattice). Training uses a straight-through estimator: the
+  forward pass sees the rounded weights, the gradient flows to the FP32 weights. The rounding
+  offsets (`cq_offsets`) are made once per update and added to the weights in every forward pass.
 """
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+from spindle import lattice
 
 GROUP = 128
 
@@ -55,23 +59,54 @@ def cq_quantize(w, codebook, group=GROUP):
     return w_q[..., :D].astype(w.dtype)
 
 
+def e8_quantize(w, group=GROUP):
+    """Dequantized E8 weights for w [..., in] (groups run along the last axis), as spindle.archive stores them."""
+    D = w.shape[-1]
+    pad = (-D) % group
+    wp = jnp.pad(w, [(0, 0)] * (w.ndim - 1) + [(0, pad)]) if pad else w
+    h = jnp.asarray(hadamard(group))
+    rotated = wp.reshape(*wp.shape[:-1], -1, group).astype(jnp.float32) @ h
+    points, gain = lattice.quantize_groups(rotated, jnp)
+    return ((points * gain) @ h).reshape(wp.shape)[..., :D].astype(w.dtype)
+
+
 def is_quantized(path, leaf):
-    """Matrices the archive stores as CQ4: dense kernels, embeddings and the mHC projections."""
+    """Matrices the archive stores as CQ: dense kernels, embeddings and the mHC projections."""
     key = str(getattr(path[-1], 'key', ''))
     return (key in ('kernel', 'embedding') or key.startswith('mhc_phi')) and getattr(leaf, 'ndim', 0) >= 2
 
 
-def cq4_ste(params, codebook):
-    """Every CQ4 matrix replaced by its 4-bit value in the forward pass (straight-through)."""
-    codebook = jnp.asarray(codebook)
+def keeps_4bit(path):
+    """Matrices a 2-bit model keeps at 4 bits, as Needle 3 does: the token embedding and the mHC mixing
+    matrices (an error there reaches every token or every layer). Engram tables stay 2-bit."""
+    keys = [str(getattr(p, 'key', '')) for p in path]
+    return keys[0] == 'embedding' or keys[-1].startswith('mhc_phi')
 
-    def ste(path, w):
+
+def cq_offsets(params, codebook, wide_codebook=None, e8=False):
+    """Rounded minus FP32 value for every CQ matrix (0 for other weights), with no gradient.
+
+    `params + offsets` is the straight-through estimator: the forward pass sees the rounded weights,
+    and the gradient reaches the FP32 weights unchanged. Making the offsets once per update (not
+    in every micro-batch) gives the same result and saves most of the rounding time.
+
+    The codebook sets the width: 16 values for 4 bits, 4 for 2 bits. With `wide_codebook` (the 4-bit
+    one), the matrices `keeps_4bit` names use it instead. With `e8`, all other matrices are rounded
+    to E8 lattice points instead of `codebook`."""
+    codebook = jnp.asarray(codebook)
+    wide = codebook if wide_codebook is None else jnp.asarray(wide_codebook)
+
+    def offset(path, w):
         if not is_quantized(path, w):
-            return w
+            return jnp.zeros((), w.dtype)
         # Kernels and mHC projections are stored [in, out]; their groups run along `in`.
         input_first = str(getattr(path[-1], 'key', '')) != 'embedding'
         x = jnp.swapaxes(w, -1, -2) if input_first else w
-        x = x + jax.lax.stop_gradient(cq_quantize(x, codebook) - x)
-        return jnp.swapaxes(x, -1, -2) if input_first else x
+        if keeps_4bit(path) or not e8:
+            q = cq_quantize(x, wide if keeps_4bit(path) else codebook)
+        else:
+            q = e8_quantize(x)
+        delta = jax.lax.stop_gradient(q - x)
+        return jnp.swapaxes(delta, -1, -2) if input_first else delta
 
-    return jax.tree_util.tree_map_with_path(ste, params)
+    return jax.tree_util.tree_map_with_path(offset, params)

@@ -12,8 +12,10 @@ Layout (all little-endian):
     permutations, per engram site [tables, key, value, taps], the final norm, optional heads,
     then the tokenizer (RAW).
 
-A CQ payload for a [out, in] matrix holds the packed 4-bit codes (LSB first) and then one
-FP16 norm per group of 128 inputs.
+A CQ payload for a [out, in] matrix holds the packed codes (4 or 2 bits each, one LSB-first
+bitstream per row) and then one FP16 norm per group of 128 inputs. The record's `bits` field
+gives the width, so one archive can hold either. `bits` = 8 marks an E8 lattice tensor (see
+spindle.lattice): one uint16 code per 8 rotated values, then one FP16 gain per group.
 
 Optional heads sit after the final norm: a manifest (FP16 codes) followed by each head's
 tensors. Code 4 is the runtime LoRA: rank-r FP16 updates on the five attention projections
@@ -27,6 +29,8 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+
+from spindle import lattice
 
 
 def parse_layers(text):
@@ -98,7 +102,7 @@ class Archive:
             dtype = '<f2' if kind == FP16 else '<f4'
             return np.frombuffer(self.payload(index), dtype).astype(np.float32).reshape(shape)
         group, bits = self.records[index][9:11]
-        if kind != CQ or ndim != 2 or group != GROUP or bits not in (2, 3, 4):
+        if kind != CQ or ndim != 2 or group != GROUP or bits not in (2, 3, 4, lattice.E8):
             raise ValueError(f'Unsupported tensor record {index}')
         return unpack_cq(self.payload(index), shape, bits, self.codebook)
 
@@ -122,12 +126,19 @@ class Archive:
 # ---------------------------------------------------------------- CQ packing
 
 def _codebook(codebook, bits):
+    if bits == lattice.E8:
+        return lattice.LEVELS
     return np.asarray(codebook, np.float32)[(1 << bits) - 4:(1 << (bits + 1)) - 4]
 
 
 def unpack_cq(blob, shape, bits, codebook):
     rows, columns = shape
     padded = (columns + GROUP - 1) // GROUP * GROUP
+    if bits == lattice.E8:
+        codes = np.frombuffer(blob, '<u2', rows * padded // 8)
+        gains = np.frombuffer(blob, '<f2', rows * padded // GROUP, rows * padded // 4).astype(np.float32)
+        unit = lattice.decode(codes).reshape(-1, GROUP) * gains.reshape(-1, 1)
+        return (unit @ _hadamard(GROUP)).reshape(rows, padded)[:, :columns]
     packed_size = rows * padded * bits // 8
     codes = np.frombuffer(blob, np.uint8, packed_size).reshape(rows, -1)
     norms = np.frombuffer(blob, '<f2', rows * padded // GROUP, packed_size).astype(np.float32)
@@ -143,21 +154,30 @@ def unpack_cq(blob, shape, bits, codebook):
     return (unit @ _hadamard(GROUP)).reshape(rows, padded)[:, :columns]
 
 
-def pack_cq4(w, codebook):
-    """[out, in] FP32 matrix -> CQ4 payload bytes (codes, then FP16 group norms)."""
+def pack_cq(w, codebook, bits=4):
+    """[out, in] FP32 matrix -> CQ payload bytes (codes, then FP16 group norms).
+
+    `codebook` is the archive's full codebook (2 | 3 | 4-bit values); `bits` is 4, 2 or lattice.E8."""
+    if bits not in (2, 4, lattice.E8):
+        raise ValueError(f'CQ packing supports 2, 4 or E8 bits, not {bits}')
     w = np.asarray(w, np.float32)
     out, columns = w.shape
     pad = (-columns) % GROUP
     if pad:
         w = np.pad(w, ((0, 0), (0, pad)))
     rotated = w.reshape(out, -1, GROUP) @ _hadamard(GROUP)
+    if bits == lattice.E8:
+        points, gain = lattice.quantize_groups(rotated)
+        return lattice.encode(points.reshape(out, -1, 8)).tobytes() + gain[..., 0].astype(np.float16).tobytes()
     norm = np.sqrt((rotated ** 2).sum(-1, keepdims=True))
     unit = (rotated / np.maximum(norm, 1e-12)).reshape(-1)
-    cb = _codebook(codebook, 4)
+    cb = _codebook(codebook, bits)
     pos = np.clip(np.searchsorted(cb, unit), 1, len(cb) - 1)
     idx = np.where(np.abs(unit - cb[pos - 1]) <= np.abs(unit - cb[pos]), pos - 1, pos).astype(np.uint8)
-    idx = idx.reshape(out, -1, 2)
-    codes = (idx[..., 0] | (idx[..., 1] << 4)).astype(np.uint8)
+    idx = idx.reshape(out, -1, 8 // bits)
+    codes = np.zeros(idx.shape[:2], np.uint8)
+    for k in range(8 // bits):
+        codes |= idx[..., k] << (k * bits)
     return codes.tobytes() + norm[..., 0].astype(np.float16).tobytes()
 
 
@@ -192,11 +212,12 @@ def _layer_names(taps):
             + ['post_attn_norm', 'attn_gate', 'pre_hada_norm'] + list(_HADAMARD))
 
 
-def load(path):
+def load(path, bits=None):
     """(params, config, codebook, runtime_lora) for an archive.
 
-    params use the Flax tree of SpindleModel (FP32, CQ4 matrices dequantized); codebook is the
-    16-value 4-bit codebook; runtime_lora is None when the archive has none.
+    params use the Flax tree of SpindleModel (FP32, CQ matrices dequantized); codebook holds the
+    values of the archive's weight width (16 for 4 bits, 4 for 2 bits), or of `bits` when given;
+    runtime_lora is None when the archive has none.
     """
     with Archive(path) as a:
         config = model_config(a.header)
@@ -239,7 +260,7 @@ def load(path):
                 'taps': a.tensor(cursor + 3)}
             cursor += 4
         stack['final_norm'] = {'scale': a.tensor(cursor)}
-        codebook = a.codebook[12:28].copy()
+        codebook = _codebook(a.codebook, bits or a.records[2][10]).copy()
     return params, config, codebook, read_lora(path)
 
 
@@ -249,21 +270,36 @@ def _stack(values):
     return np.stack(values)
 
 
-def _fp16(value):
-    value = np.asarray(value, np.float16)
-    return FP16, value.shape, value.tobytes()
+def weight_bits(path):
+    """Width of the archive's CQ weights: that of the first attention matrix (a 2-bit model keeps
+    its embedding at 4 bits)."""
+    with Archive(path) as a:
+        return a.records[2][10]
 
 
-def _cq(matrix, codebook):
-    matrix = np.asarray(matrix, np.float32)
-    return CQ, matrix.shape, pack_cq4(matrix, codebook)
+def codebook(path, bits):
+    """The archive's codebook values for one width (16 for 4 bits, 4 for 2 bits)."""
+    with Archive(path) as a:
+        return _codebook(a.codebook, bits).copy()
 
 
-def backbone_tensors(params, config, codebook):
-    """(dtype, shape, payload) for every backbone tensor, in archive order (no heads, no tokenizer)."""
+def backbone_tensors(params, config, codebook, bits=4):
+    """(dtype, shape, payload, bits) for every backbone tensor, in archive order (no heads, no tokenizer).
+
+    CQ matrices use `bits`; a 2-bit model keeps the embedding and the mHC mixing matrices at 4 bits
+    (see quantize.keeps_4bit). bits is 0 for FP tensors."""
+    def _cq(matrix, codebook, wide=False):
+        matrix = np.asarray(matrix, np.float32)
+        width = 4 if wide else bits
+        return CQ, matrix.shape, pack_cq(matrix, codebook, width), width
+
+    def _fp16(value):
+        value = np.asarray(value, np.float16)
+        return FP16, value.shape, value.tobytes(), 0
+
     block = params['stack']['layers']['block']
     sa, mlp = block['self_attn'], block['hadamard_mlp']
-    out = [_cq(params['embedding']['embedding'], codebook)]
+    out = [_cq(params['embedding']['embedding'], codebook, wide=True)]
     for i in range(config.num_layers):
         for name in _layer_names(config.qkv_conv_taps):
             if name.endswith('_proj'):
@@ -283,10 +319,10 @@ def backbone_tensors(params, config, codebook):
     for name in _MHC_PHI:
         phi = np.asarray(stack[name])
         L, nC, lanes = phi.shape
-        out.append(_cq(phi.transpose(0, 2, 1).reshape(L * lanes, nC), codebook))
+        out.append(_cq(phi.transpose(0, 2, 1).reshape(L * lanes, nC), codebook, wide=True))
     from spindle.model.architecture import hadamard_perms
     hada_n = 1 << (config.d_model - 1).bit_length()
-    out += [(FP32, (hada_n,), np.asarray(p, np.float32).tobytes()) for p in hadamard_perms(hada_n)]
+    out += [(FP32, (hada_n,), np.asarray(p, np.float32).tobytes(), 0) for p in hadamard_perms(hada_n)]
     for site in range(len(config.engram_layers)):
         engram = params[f'engrams_{site}']
         tables = np.asarray(engram['embedding'])
@@ -298,18 +334,24 @@ def backbone_tensors(params, config, codebook):
     return out
 
 
-def save(parent, params, config, output, runtime_lora=None):
+def save(parent, params, config, output, runtime_lora=None, bits=None):
     """Write `params` into a copy of `parent` (same layout); heads and tokenizer are kept.
 
+    Backbone CQ matrices are stored at `bits` (default: the parent's width).
     The parent's runtime LoRA is replaced by `runtime_lora` (or removed when it is None).
     """
-    raw = bytearray(Path(parent).read_bytes())
-    with Archive(parent) as a:
-        tensors = backbone_tensors(params, config, a.codebook)
-        for index, ((kind, shape, blob), record) in enumerate(zip(tensors, a.records)):
-            if kind != record[0] or tuple(shape) != tuple(record[3:3 + record[1]]) or len(blob) != record[8]:
-                raise ValueError(f'Tensor {index} does not match the parent archive layout')
-            raw[record[7]:record[7] + record[8]] = blob
+    raw = Path(parent).read_bytes()
+    header, start, records = _directory(raw)
+    blobs = [raw[r[7]:r[7] + r[8]] for r in records]
+    bits = bits or records[2][10]
+    tensors = backbone_tensors(params, config, np.frombuffer(raw, '<f4', header[2], HEADER.size), bits)
+    for index, ((kind, shape, blob, width), record) in enumerate(zip(tensors, records)):
+        if kind != record[0] or tuple(shape) != tuple(record[3:3 + record[1]]):
+            raise ValueError(f'Tensor {index} does not match the parent archive layout')
+        if kind == CQ:
+            record[10] = width
+        blobs[index] = blob
+    raw = bytearray(_rewrite(raw, header, start, records, blobs))
     mask = sum(1 << i for i in config.skip_layers)
     struct.pack_into('<II', raw, 45 * 4, mask & 0xFFFFFFFF, mask >> 32)
     raw = strip_lora(bytes(raw))
@@ -342,6 +384,32 @@ def to_monarch(source, output):
             matrix = np.frombuffer(blobs[index], np.float16).reshape(size, size)
             blobs[index] = np.ascontiguousarray(np.broadcast_to(matrix, (copies, size, size))).tobytes()
             records[index][1], records[index][3:7] = 3, [copies, size, size, 0]
+    _atomic_write(output, _rewrite(raw, header, start, records, blobs))
+    return Path(output)
+
+
+def widen_taps(source, output, taps):
+    """Copy an archive with `taps` Q/K/V convolution taps per layer; the added (older) taps are zero.
+
+    The model computes exactly the same thing; training can then use the longer window.
+    """
+    raw = Path(source).read_bytes()
+    header, start, records = _directory(raw)
+    if not header[19] or taps < header[19]:
+        raise ValueError(f'Cannot widen {header[19]} convolution taps to {taps}')
+    blobs = [raw[r[7]:r[7] + r[8]] for r in records]
+    names = _layer_names(header[19])
+    for layer in range(header[10]):
+        for name in ('q_taps', 'k_taps', 'v_taps'):
+            index = 1 + layer * len(names) + names.index(name)
+            r = records[index]
+            if r[0] != FP16 or r[1] != 2 or r[3] != header[19]:
+                raise ValueError(f'Unexpected tensor at index {index} for layer {layer} {name}')
+            old = np.frombuffer(blobs[index], np.float16).reshape(r[3], r[4])
+            blobs[index] = np.concatenate([old, np.zeros((taps - r[3], r[4]), np.float16)]).tobytes()
+            r[3] = taps
+    header = list(header)
+    header[19] = taps
     _atomic_write(output, _rewrite(raw, header, start, records, blobs))
     return Path(output)
 

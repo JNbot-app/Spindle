@@ -1,11 +1,15 @@
 """Fine-tune a .cact model on tool-calling data and export a new .cact.
 
 What trains:
-  * every backbone weight, through the 4-bit quantizer (straight-through), at `lr`,
+  * every backbone weight, through the CQ quantizer (straight-through) at `weight_bits` (4, or 2
+    for a smaller model, or 8 for 2-bit E8 lattice codes; default the parent's width; a 2-bit model
+    keeps the embedding and the mHC mixing matrices at 4 bits, as Needle 3 does), at `lr`,
   * the Hadamard MLP blocks at their own, higher rate `hadamard_lr` (they are small FP16
     tensors, so they are not limited by 4-bit rounding),
   * the runtime LoRA on the attention projections at `lora_lr` (continued when the parent
     model already has one),
+  * the Q/K/V convolution taps at `conv_lr` (default `lr`); `conv_taps` can widen them first,
+    with the extra taps starting at zero,
 with an optional span attention loss (see spans.py) and an optional decision term, where a frozen
 reasoning `teacher` teaches the call / no-call choice (see decision.py). With decode skip (`skip_layers`, or the
 parent's own list), answer tokens skip those layers in training as the engine does at decode, so the model
@@ -22,6 +26,7 @@ of rows of similar length so short rows are not padded to the longest one.
 """
 import json
 import math
+import tempfile
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -31,11 +36,12 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
-from spindle import archive
+from spindle import archive, lattice
 from spindle.model import quantize, runtime_lora
 from spindle.model.architecture import SpindleModel, attention_mask
 from spindle.tokenizer import Tokenizer
 from . import data, decision, spans, tool_lists
+from .loss_trend import LossTrend
 from .config import TrainConfig
 
 RESUME_WARMUP = 50  # updates of warm-up after a resume (the optimizer state is not saved)
@@ -59,20 +65,28 @@ def make_optimizer(trainable, steps, config, start=0):
             return 'lora'
         if 'hadamard_mlp' in names:
             return 'hadamard'
+        if names[-1] in ('q_taps', 'k_taps', 'v_taps'):
+            return 'conv'
         return 'decay' if names[-1] in ('kernel', 'embedding') or names[-1].startswith('mhc_phi') else 'no_decay'
 
     def adamw(rate, decay):
         return optax.adamw(_schedule(rate, steps, config, start), b1=0.9, b2=0.999, eps=1e-8, weight_decay=decay)
 
     transforms = {'decay': adamw(config.lr, config.weight_decay), 'no_decay': adamw(config.lr, 0.),
-                  'hadamard': adamw(config.hadamard_lr, 0.), 'lora': adamw(config.lora_lr, 0.)}
+                  'hadamard': adamw(config.hadamard_lr, 0.), 'lora': adamw(config.lora_lr, 0.),
+                  'conv': adamw(config.conv_lr or config.lr, 0.)}
     labels = jax.tree_util.tree_map_with_path(label, trainable)
     return optax.chain(optax.clip_by_global_norm(config.clip), optax.multi_transform(transforms, labels))
 
 
-def make_loss(model_config, codebook, pad_id, span_weight, distill_weight=0., decisions=None):
+def make_loss(model_config, codebook, pad_id, span_weight, distill_weight=0., decisions=None, wide_codebook=None,
+              e8=False):
+    """(loss_sums, rounding): rounding(model params) gives the CQ offsets that loss_sums adds to them."""
     model = SpindleModel(model_config)
     codebook = jnp.asarray(codebook)
+
+    def rounding(model_params):
+        return quantize.cq_offsets(model_params, codebook, wide_codebook, e8)
 
     def decision_sum(logits, batch, teacher):
         """Cross-entropy of the student's `[]` / `[{"` choice against the teacher's chance of declining."""
@@ -88,9 +102,9 @@ def make_loss(model_config, codebook, pad_id, span_weight, distill_weight=0., de
         choice = jax.nn.log_softmax(choice.astype(jnp.float32))
         return jnp.sum(-(target * choice[:, 0] + (1 - target) * choice[:, 1]) * batch['decide'])
 
-    def loss_sums(trainable, batch, with_spans=True, teacher=None):
+    def loss_sums(trainable, batch, offsets, with_spans=True, teacher=None):
         """(weighted loss sum, weight sum); the caller divides once over the whole batch."""
-        params = runtime_lora.apply(quantize.cq4_ste(trainable['model'], codebook), trainable['lora'])
+        params = runtime_lora.apply(jax.tree.map(jnp.add, trainable['model'], offsets), trainable['lora'])
         tokens = batch['tokens']
         mask = attention_mask(tokens, model_config.kv_window, pad_id)
         answer = (batch['weights'] > 0).astype(jnp.float32)      # decode skip applies to answer tokens
@@ -109,15 +123,20 @@ def make_loss(model_config, codebook, pad_id, span_weight, distill_weight=0., de
             total = total + distill_weight * decision_sum(logits, batch, teacher)
         return total, jnp.sum(weights)
 
-    return loss_sums
+    return loss_sums, rounding
 
 
-def make_steps(loss_sums, optimizer, devices):
-    """(accumulate, apply): add the gradients of one group of rows; then make one update."""
-    def accumulate(trainable, carry, batches, teacher):
+def make_steps(loss_sums, rounding, optimizer, devices):
+    """(round_weights, accumulate, apply): make the rounding offsets of the weights once per update;
+    add the gradients of one group of rows; then make one update."""
+    def round_weights(trainable):
+        return rounding(trainable['model'])
+
+    def accumulate(trainable, carry, batches, teacher, offsets):
         def one(carry, batch):
             total, count, grads = carry
-            (value, weight), grad = jax.value_and_grad(loss_sums, has_aux=True)(trainable, batch, teacher=teacher)
+            (value, weight), grad = jax.value_and_grad(loss_sums, has_aux=True)(trainable, batch, offsets,
+                                                                                teacher=teacher)
             return (total + value, count + weight, jax.tree.map(jnp.add, grads, grad)), None
 
         return jax.lax.scan(one, carry, batches)[0]
@@ -131,8 +150,8 @@ def make_steps(loss_sums, optimizer, devices):
         return optax.apply_updates(trainable, updates), state, total / jnp.maximum(count, 1.), optax.global_norm(grads)
 
     if devices > 1:
-        return jax.pmap(accumulate, axis_name='devices'), jax.pmap(apply, axis_name='devices')
-    return jax.jit(accumulate), jax.jit(apply)
+        return jax.pmap(round_weights), jax.pmap(accumulate, axis_name='devices'), jax.pmap(apply, axis_name='devices')
+    return jax.jit(round_weights), jax.jit(accumulate), jax.jit(apply)
 
 
 def _shard(batch, devices, micro):
@@ -144,14 +163,16 @@ def _shard(batch, devices, micro):
     return out
 
 
-def _validate(evaluate, trainable, datasets, size):
+def _validate(evaluate, round_weights, trainable, datasets, size):
     """{task: loss} over the validation sets."""
+    offsets = round_weights(trainable)
     result = {}
     for task, dataset in datasets.items():
         total = count = 0.
         length = dataset.padded_length(range(len(dataset)))
         for start in range(0, len(dataset), size):
-            value, weight = evaluate(trainable, dataset.batch(range(start, min(start + size, len(dataset))), size, length))
+            value, weight = evaluate(trainable, dataset.batch(range(start, min(start + size, len(dataset))), size, length),
+                                     offsets)
             total, count = total + float(value), count + float(weight)
         result[task] = round(total / max(count, 1.), 4)
     return result
@@ -185,10 +206,21 @@ def finetune(parent, train_path, output, *, validation_path=None, config=TrainCo
         progress = json.loads((Path(config.resume) / 'progress.json').read_text())
         parent = Path(config.resume) / 'model.cact'
         print(f'Resuming after round {progress["round"]} ({progress["updates"]:,} updates) from {parent}', flush=True)
+    with archive.Archive(parent) as a:
+        taps = a.header[19]
+    bits = config.weight_bits or archive.weight_bits(parent)
+    if bits not in (2, 4, lattice.E8):
+        raise ValueError(f'weight_bits must be 4, 2 or 8 (E8 lattice), not {bits}')
+    if config.conv_taps and config.conv_taps != taps:
+        widened = Path(tempfile.mkdtemp()) / 'parent.cact'  # not in `output`: only the trained model is kept
+        print(f'Widening the Q/K/V convolution from {taps} to {config.conv_taps} taps (new taps start at zero)',
+              flush=True)
+        parent = archive.widen_taps(parent, widened, config.conv_taps)
     print(f'Loading {parent}', flush=True)
-    params, model_config, codebook, parent_lora = archive.load(parent)
+    params, model_config, codebook, parent_lora = archive.load(parent, bits)
     tokenizer = Tokenizer.from_archive(parent)
-    print(f'  {model_config.num_layers} layers, width {model_config.d_model}, '
+    print(f'  {model_config.num_layers} layers, width {model_config.d_model}, {"E8 lattice" if bits == lattice.E8 else f"{bits}-bit"} weights '
+          f'(parent {archive.weight_bits(parent)}-bit), '
           f'{"Monarch" if model_config.monarch else "Kronecker"} Hadamard factors, '
           f'KV window {model_config.kv_window}', flush=True)
     if config.skip_layers:
@@ -240,12 +272,21 @@ def finetune(parent, train_path, output, *, validation_path=None, config=TrainCo
         if (teacher_config.num_layers, teacher_config.d_model, teacher_config.monarch) != \
                 (model_config.num_layers, model_config.d_model, model_config.monarch):
             raise ValueError('The teacher must have the same architecture as the model')
+        extra = model_config.qkv_conv_taps - teacher_config.qkv_conv_taps
+        if extra:  # the teacher runs with the model's settings: give it the same taps, the extra ones zero
+            if extra < 0 or not teacher_config.qkv_conv_taps:
+                raise ValueError('The teacher has more Q/K/V convolution taps than the model')
+            attention = teacher['stack']['layers']['block']['self_attn']
+            for name in ('q_taps', 'k_taps', 'v_taps'):
+                attention[name] = np.pad(attention[name], ((0, 0), (0, extra), (0, 0)))
         # archive.load already gives the 4-bit values the engine uses, so no quantizer here.
         teacher = jax.tree.map(jnp.asarray, teacher if teacher_lora is None else runtime_lora.apply(teacher, teacher_lora))
         decisions = decision.Decisions(tokenizer)
-    loss_sums = make_loss(model_config, codebook, tokenizer.pad_id, config.span_weight, config.distill_weight, decisions)
-    accumulate, apply = make_steps(loss_sums, optimizer, devices)
-    evaluate = jax.jit(lambda t, b: loss_sums(t, b, with_spans=False))
+    loss_sums, rounding = make_loss(model_config, codebook, tokenizer.pad_id, config.span_weight, config.distill_weight, decisions,
+                          archive.codebook(parent, 4) if bits != 4 else None, bits == lattice.E8)
+    round_weights, accumulate, apply = make_steps(loss_sums, rounding, optimizer, devices)
+    evaluate = jax.jit(lambda t, b, offsets: loss_sums(t, b, offsets, with_spans=False))
+    host_rounding = jax.jit(lambda t: rounding(t['model']))  # for validation, on the host copy
     eval_size = per_call * 4
     zero = (jnp.float32(0), jnp.float32(0), jax.tree.map(jnp.zeros_like, trainable))
 
@@ -256,9 +297,12 @@ def finetune(parent, train_path, output, *, validation_path=None, config=TrainCo
         log.flush()
         print(json.dumps(entry), flush=True)
 
+    validation_points = []  # (update, mean validation loss) for loss.png
     if validation_sets:
         print('Validation before training', flush=True)
-        record({'step': first_round * per_round, 'validation_loss': _validate(evaluate, trainable, validation_sets, eval_size)})
+        before = _validate(evaluate, host_rounding, trainable, validation_sets, eval_size)
+        validation_points.append((first_round * per_round, float(np.mean(list(before.values())))))
+        record({'step': first_round * per_round, 'validation_loss': before})
 
     if devices > 1:
         # One copy per device: pmap splits the leading axis over the devices on the first call.
@@ -273,6 +317,7 @@ def finetune(parent, train_path, output, *, validation_path=None, config=TrainCo
 
     print(f'Training {steps:,} updates of {config.batch_size} rows in {rounds} round(s) of {per_round:,}', flush=True)
     step, model_path, round_minutes, train_rows = first_round * per_round, None, 0., 0
+    trend = LossTrend(start=step)
     last_round = min(rounds, first_round + config.rounds) if config.rounds else rounds
     for round_index in range(first_round, last_round):
         round_started = time.monotonic()
@@ -304,29 +349,36 @@ def finetune(parent, train_path, output, *, validation_path=None, config=TrainCo
             picked = order[index * config.batch_size:(index + 1) * config.batch_size].tolist()
             if step == first_round * per_round and index == 0:
                 print('Compiling the training step (the first updates are slow)', flush=True)
-            carry = zero
+            carry, offsets = zero, round_weights(trainable)
             for group in train_set.groups(picked, config.group_rows):
                 carry = accumulate(trainable, carry, _shard(train_set.batch(group, config.group_rows),
-                                                            devices, config.micro_batch), teacher)
+                                                            devices, config.micro_batch), teacher, offsets)
             trainable, state, loss, grad_norm = apply(trainable, state, carry)
             loss = float(np.mean(loss))
             if not math.isfinite(loss):
                 raise FloatingPointError(f'Non-finite loss at update {step + 1}')
             losses.append(loss)
+            trend.add(loss)
             step += 1
             if step % config.log_every == 0 or index + 1 == updates:
                 spent = time.monotonic() - train_started
                 record({'step': step, 'round': round_index + 1, 'loss': round(sum(losses) / len(losses), 4),
-                        'grad_norm': round(float(np.mean(grad_norm)), 3),
+                        **trend.summary(), 'grad_norm': round(float(np.mean(grad_norm)), 3),
                         'seconds_per_update': round(spent / (index + 1), 2),
                         'round_left_min': round(spent / (index + 1) * (updates - index - 1) / 60, 1)})
                 losses = []
+            chart = trend.chart()
+            if chart:
+                print(chart, flush=True)
 
         current = jax.device_get(host(trainable))
-        validation = _validate(evaluate, current, validation_sets, eval_size) if validation_sets else {}
+        validation = _validate(evaluate, host_rounding, current, validation_sets, eval_size) if validation_sets else {}
+        if validation:
+            validation_points.append((step, float(np.mean(list(validation.values())))))
+        trend.plot(output / 'loss.png', validation_points)
         print(f'Round {round_index + 1}/{rounds}: exporting', flush=True)
         model_path = archive.save(parent, jax.tree.map(np.asarray, current['model']), model_config,
-                                  output / 'model.cact', jax.tree.map(np.asarray, current['lora']))
+                                  output / 'model.cact', jax.tree.map(np.asarray, current['lora']), bits)
         round_minutes = (time.monotonic() - round_started) / 60
         state_now = {'round': round_index + 1, 'rounds': rounds, 'updates': step, 'total_updates': steps,
                      'updates_per_round': per_round, 'validation_loss': validation,

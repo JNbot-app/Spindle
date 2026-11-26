@@ -1,0 +1,249 @@
+{
+ "model": "models/spindle-2bit.cact",
+ "limit": 200,
+ "results": {
+  "mobile_actions": {
+   "score": 84.5,
+   "metric": "accuracy",
+   "cases": 200,
+   "call_rate_when_needed": 100.0,
+   "decline_rate_when_not": null,
+   "groups": {},
+   "errors": 0,
+   "seconds_per_case": 0.769
+  },
+  "droidcall": {
+   "score": 37.0,
+   "metric": "accuracy",
+   "cases": 200,
+   "call_rate_when_needed": 75.0,
+   "decline_rate_when_not": null,
+   "groups": {},
+   "errors": 0,
+   "seconds_per_case": 0.393
+  },
+  "bfcl": {
+   "score": 50.5,
+   "metric": "accuracy",
+   "cases": 200,
+   "call_rate_when_needed": 82.7,
+   "decline_rate_when_not": 67.2,
+   "groups": {
+    "irrelevance": {
+     "score": 61.5,
+     "cases": 13
+    },
+    "live_irrelevance": {
+     "score": 68.5,
+     "cases": 54
+    },
+    "live_multiple": {
+     "score": 40.4,
+     "cases": 52
+    },
+    "live_parallel": {
+     "score": 33.3,
+     "cases": 3
+    },
+    "live_simple": {
+     "score": 18.8,
+     "cases": 16
+    },
+    "multiple": {
+     "score": 57.1,
+     "cases": 7
+    },
+    "parallel": {
+     "score": 38.5,
+     "cases": 13
+    },
+    "parallel_multiple": {
+     "score": 41.7,
+     "cases": 12
+    },
+    "simple_java": {
+     "score": 40.0,
+     "cases": 5
+    },
+    "simple_javascript": {
+     "score": 0.0,
+     "cases": 3
+    },
+    "simple_python": {
+     "score": 68.2,
+     "cases": 22
+    }
+   },
+   "errors": 0,
+   "seconds_per_case": 0.723
+  },
+  "when2call": {
+   "score": 72.5,
+   "metric": "accuracy",
+   "cases": 200,
+   "call_rate_when_needed": 71.8,
+   "decline_rate_when_not": 73.0,
+   "groups": {
+    "cannot_answer": {
+     "score": 70.6,
+     "cases": 68
+    },
+    "request_for_info": {
+     "score": 75.9,
+     "cases": 54
+    },
+    "tool_call": {
+     "score": 71.8,
+     "cases": 78
+    }
+   },
+   "errors": 0,
+   "seconds_per_case": 0.944
+  },
+  "tool_removed": {
+   "score": 73.0,
+   "metric": "accuracy",
+   "cases": 200,
+   "call_rate_when_needed": null,
+   "decline_rate_when_not": 73.0,
+   "groups": {},
+   "errors": 0,
+   "seconds_per_case": 0.534
+  },
+  "dstc8": {
+   "score": 35.1,
+   "metric": "field F1",
+   "cases": 200,
+   "call_rate_when_needed": 99.0,
+   "decline_rate_when_not": null,
+   "groups": {
+    "Alarm_1": {
+     "score": 100.0,
+     "cases": 3
+    },
+    "Buses_3": {
+     "score": 38.1,
+     "cases": 19
+    },
+    "Events_3": {
+     "score": 32.6,
+     "cases": 15
+    },
+    "Flights_4": {
+     "score": 27.3,
+     "cases": 6
+    },
+    "Homes_2": {
+     "score": 22.2,
+     "cases": 19
+    },
+    "Hotels_2": {
+     "score": 19.0,
+     "cases": 6
+    },
+    "Hotels_4": {
+     "score": 38.1,
+     "cases": 15
+    },
+    "Media_3": {
+     "score": 42.9,
+     "cases": 6
+    },
+    "Messaging_1": {
+     "score": 100.0,
+     "cases": 2
+    },
+    "Movies_1": {
+     "score": 42.9,
+     "cases": 7
+    },
+    "Music_3": {
+     "score": 40.0,
+     "cases": 5
+    },
+    "Payment_1": {
+     "score": 57.1,
+     "cases": 3
+    },
+    "RentalCars_3": {
+     "score": 13.7,
+     "cases": 27
+    },
+    "Restaurants_2": {
+     "score": 36.0,
+     "cases": 13
+    },
+    "RideSharing_2": {
+     "score": 66.7,
+     "cases": 2
+    },
+    "Services_1": {
+     "score": 69.2,
+     "cases": 10
+    },
+    "Services_4": {
+     "score": 63.4,
+     "cases": 13
+    },
+    "Trains_1": {
+     "score": 18.9,
+     "cases": 17
+    },
+    "Travel_1": {
+     "score": 37.5,
+     "cases": 6
+    },
+    "Weather_1": {
+     "score": 72.7,
+     "cases": 6
+    }
+   },
+   "errors": 0,
+   "seconds_per_case": 0.462
+  },
+  "snips_gold": {
+   "score": 26.1,
+   "metric": "field F1",
+   "cases": 200,
+   "call_rate_when_needed": 99.5,
+   "decline_rate_when_not": null,
+   "groups": {},
+   "errors": 0,
+   "seconds_per_case": 0.289
+  },
+  "snips_7way": {
+   "score": 17.5,
+   "metric": "field F1",
+   "cases": 200,
+   "call_rate_when_needed": 98.5,
+   "decline_rate_when_not": null,
+   "groups": {},
+   "errors": 0,
+   "seconds_per_case": 0.213
+  },
+  "rotten_tomatoes": {
+   "score": 67.5,
+   "metric": "accuracy",
+   "cases": 200,
+   "call_rate_when_needed": 100.0,
+   "decline_rate_when_not": null,
+   "groups": {},
+   "errors": 0,
+   "seconds_per_case": 0.126
+  },
+  "dbpedia": {
+   "score": 44.5,
+   "metric": "accuracy",
+   "cases": 200,
+   "call_rate_when_needed": 100.0,
+   "decline_rate_when_not": null,
+   "groups": {},
+   "errors": 0,
+   "seconds_per_case": 0.165
+  }
+ },
+ "name": "Spindle 2-bit",
+ "size_mb": 46.9,
+ "order": 1.5,
+ "chart": false
+}

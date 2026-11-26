@@ -3,13 +3,32 @@
 #include "kernels.h"
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace spindle {
+// Calls f(codes, row, count) over rows [begin, begin + rows) with codes in Layout::nibbles
+// (padded / 2 bytes per row). Kernels without a native 2-bit path use this: such rows are
+// widened a few at a time into a small per-thread buffer, never the whole tensor.
+template<class F>
+void nibble_rows(const Tensor &t, size_t begin, size_t rows, F &&f) {
+    const size_t half = t.padded / 2;
+    if (t.layout == Layout::nibbles) { f(t.data + begin * half, begin, rows); return; }
+    thread_local std::vector<uint8_t> buffer;
+    const size_t chunk = std::max(size_t(4), (size_t(65536) / half) & ~size_t(3));
+    buffer.resize(chunk * half);
+    for (size_t r = 0; r < rows; r += chunk) {
+        const size_t count = std::min(chunk, rows - r);
+        t.nibble_rows(begin + r, count, buffer.data());
+        f(buffer.data(), begin + r, count);
+    }
+}
+
 // Four independent lanes and separate even/odd accumulators keep reductions
 // identical across scalar, NEON, SSE2 and AVX2. Never contract multiply/add.
+// Rows from `row` on, from decoded FP32 weights (first row at `weights`) or nibble `codes`.
 template<class Ops>
-void kernel_project(const Tensor &t, const float *inputs, const float *weights,
-                    size_t batch, size_t begin, size_t rows, float *out, size_t stride) {
+void project_block(const Tensor &t, const float *inputs, const float *weights, const uint8_t *codes,
+                   size_t batch, size_t begin, size_t rows, float *out, size_t stride) {
     Ops book(t.book.data());
     const size_t groups = t.padded / 128, half = t.padded / 2;
     for (size_t r = 0; r < rows; r += 4) {
@@ -31,7 +50,7 @@ void kernel_project(const Tensor &t, const float *inputs, const float *weights,
                             const float *p = weights + (r + ri) * t.padded + g * 64 + k;
                             w = Ops::load(p, p + half);
                         } else {
-                            const uint8_t *p = t.data + (begin + r + ri) * half + g * 64 + k;
+                            const uint8_t *p = codes + (r + ri) * half + g * 64 + k;
                             w = book.lookup(p);
                         }
                         for (size_t bi = 0; bi < nb; ++bi)
@@ -47,6 +66,14 @@ void kernel_project(const Tensor &t, const float *inputs, const float *weights,
         }
     }
 }
+template<class Ops>
+void kernel_project(const Tensor &t, const float *inputs, const float *weights,
+                    size_t batch, size_t begin, size_t rows, float *out, size_t stride) {
+    if (weights) return project_block<Ops>(t, inputs, weights, nullptr, batch, begin, rows, out, stride);
+    nibble_rows(t, begin, rows, [&](const uint8_t *codes, size_t row, size_t count) {
+        project_block<Ops>(t, inputs, nullptr, codes, batch, row, count, out + (row - begin), stride);
+    });
+}
 
 // The legacy integer contract, but centroids are looked up from packed bytes.
 // Activations are quantized once per projection, never once per output row.
@@ -54,10 +81,10 @@ void kernel_project(const Tensor &t, const float *inputs, const float *weights,
 // integer sums and the float combination order match the reference exactly.
 template<class Ops, size_t NR>
 void integer_rows(const Tensor &t, const IntegerInput &input, const typename Ops::Table &table,
-                  size_t row, float *out) {
+                  const uint8_t *nibbles, size_t row, float *out) {
     const size_t groups=t.padded/128,half=t.padded/2;
     const uint8_t *codes[NR];
-    for(size_t ri=0;ri<NR;++ri) codes[ri]=t.data+(row+ri)*half;
+    for(size_t ri=0;ri<NR;++ri) codes[ri]=nibbles+ri*half;
     float sum[NR]{};
     for(size_t g=0;g<groups;++g) {
         typename Ops::Acc even[NR]{},odd[NR]{};
@@ -81,23 +108,29 @@ template<class Ops>
 void kernel_integer(const Tensor &t, const IntegerInput &input, size_t begin,
                     size_t rows, float *out) {
     const auto table=Ops::table_i8(input.book);
-    size_t r=0;
-    for(;r+4<=rows;r+=4) integer_rows<Ops,4>(t,input,table,begin+r,out+r);
-    for(;r<rows;++r) integer_rows<Ops,1>(t,input,table,begin+r,out+r);
+    nibble_rows(t,begin,rows,[&](const uint8_t *codes,size_t row,size_t count) {
+        const size_t half=t.padded/2;
+        float *o=out+(row-begin);
+        size_t r=0;
+        for(;r+4<=count;r+=4) integer_rows<Ops,4>(t,input,table,codes+r*half,row+r,o+r);
+        for(;r<count;++r) integer_rows<Ops,1>(t,input,table,codes+r*half,row+r,o+r);
+    });
 }
 
 template<class Ops>
 void kernel_decode(const Tensor &t, size_t begin, size_t rows, float *weights, bool scaled) {
     Ops book(t.book.data());
     const size_t half = t.padded / 2, groups = t.padded / 128;
-    for (size_t r = 0; r < rows; ++r)
-        for (size_t g = 0; g < groups; ++g)
-            for (size_t k = 0; k < 64; k += 4) {
-                auto v = book.lookup(t.data + (begin + r) * half + g * 64 + k);
-                if (scaled) v = Ops::scale(v, t.values[(begin + r) * groups + g]);
-                float *p = weights + r * t.padded + g * 64 + k;
-                Ops::store(p, p + half, v);
-            }
+    nibble_rows(t, begin, rows, [&](const uint8_t *codes, size_t row, size_t count) {
+        for (size_t r = 0; r < count; ++r)
+            for (size_t g = 0; g < groups; ++g)
+                for (size_t k = 0; k < 64; k += 4) {
+                    auto v = book.lookup(codes + r * half + g * 64 + k);
+                    if (scaled) v = Ops::scale(v, t.values[(row + r) * groups + g]);
+                    float *p = weights + (row - begin + r) * t.padded + g * 64 + k;
+                    Ops::store(p, p + half, v);
+                }
+    });
 }
 
 template<class Ops>

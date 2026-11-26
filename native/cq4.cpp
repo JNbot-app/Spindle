@@ -52,6 +52,15 @@ static void project_rows(void *context,size_t first,size_t last) {
     job.kernel.project(job.tensor,job.inputs,job.weights?job.weights+first*job.tensor.padded:nullptr,
                        job.batch,job.begin+first,last-first,job.out+first,job.stride);
 }
+float int8_book(const float *book,int8_t *out) {
+    float maximum=0.f;
+    for(size_t i=0;i<16;++i)maximum=std::max(maximum,std::abs(book[i]));
+    const float scale=maximum>0 ? maximum/127.f : 1.f,inv=1.f/scale;
+    if(!std::isfinite(inv))throw std::invalid_argument("Integer codebook scale underflow");
+    for(size_t i=0;i<16;++i)
+        out[i]=int8_t(std::clamp(int(std::round(book[i]*inv)),-128,127));
+    return scale;
+}
 static IntegerInput integer_input(const Tensor &t,const float *inputs,std::vector<float> &tile) {
     const size_t groups=t.padded/128,half=t.padded/2;
     if(t.padded+16+groups*2*sizeof(float)>tile.size()*sizeof(float))
@@ -59,12 +68,7 @@ static IntegerInput integer_input(const Tensor &t,const float *inputs,std::vecto
     auto *activation=reinterpret_cast<int8_t *>(tile.data());
     int8_t *book=activation+t.padded;
     float *scales=tile.data()+(t.padded+16)/sizeof(float);
-    float maximum=0.f;
-    for(float v:t.book)maximum=std::max(maximum,std::abs(v));
-    const float book_scale=maximum>0 ? maximum/127.f : 1.f,inv_book=1.f/book_scale;
-    if(!std::isfinite(inv_book))throw std::invalid_argument("Integer codebook scale underflow");
-    for(size_t i=0;i<16;++i)
-        book[i]=int8_t(std::clamp(int(std::round(t.book[i]*inv_book)),-128,127));
+    const float book_scale=int8_book(t.book.data(),book);
     for(size_t g=0;g<groups;++g)
         for(size_t part=0;part<2;++part) {
             const size_t offset=part*half+g*64;

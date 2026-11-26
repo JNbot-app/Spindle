@@ -31,14 +31,24 @@ using factor_t = __fp16;
 #else
 using factor_t = float;
 #endif
+// How CQ codes sit in memory. Every layout keeps a row's 128-groups in order, and inside a group
+// the even and odd weights apart (the split the rotated inputs use, see cq4_prepare_input).
+enum class Layout : uint8_t {
+    nibbles, // 4-bit: 64 bytes per group, byte k holds weight 2k (low nibble) and 2k+1 (high).
+    crumbs,  // 2-bit, as in the archive: 32 bytes per group, byte m holds weights 4m..4m+3 (low bits first).
+};
 struct Tensor {
     uint32_t kind = 0, ndim = 0, group = 0, bits = 0, padded = 0;
+    Layout layout = Layout::nibbles;
     std::array<uint32_t, 4> shape{};
-    size_t elements = 0, bytes = 0, packed_bytes = 0;
+    size_t elements = 0, bytes = 0;
     const uint8_t *data = nullptr;
     std::vector<float> values; // FP16 parameters or group norms, never dense CQ weights.
-    std::vector<uint8_t> nibbles; // CQ codes narrower than 4 bits, widened to nibbles at load.
+    std::vector<uint8_t> repacked; // 1-bit, 3-bit and E8 codes, widened to nibbles at load.
     std::array<float, 16> book{};
+    size_t row_bytes() const { return layout == Layout::nibbles ? padded / 2 : padded / 4; }
+    // Rows [first, first + count) as nibbles (Layout::nibbles), for kernels without a native path.
+    void nibble_rows(size_t first, size_t count, uint8_t *out) const;
     float scalar(size_t) const;
     const float *floats() const {
         return kind == 1 ? values.data() : reinterpret_cast<const float *>(data);

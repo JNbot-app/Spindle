@@ -15,9 +15,12 @@ class TrainConfig:
     group_rows: int = 8           # rows padded to one length together (similar lengths are grouped)
     max_len: int = 512
     lr: float = 1e-5              # backbone
+    weight_bits: int = 0          # CQ weight width trained for and saved: 4, 2 or 8 (E8 lattice, ~2 bits) (0: the parent's)
     hadamard_lr: float = 1e-3
     lora_lr: float = 3e-3
     lora_rank: int = 16           # may be higher than the parent's rank: the extra rows start at zero
+    conv_taps: int = 0            # Q/K/V convolution taps; above the parent's, the extra taps start at zero (0: parent's)
+    conv_lr: float = 0.           # Q/K/V convolution taps (0: `lr`)
     span_weight: float = 0.5      # 0 turns span attention supervision off
     teacher: str = ''             # reasoning .cact whose call / no-call choice is distilled (see decision.py)
     distill_weight: float = 0.    # weight of that decision term (0: off)

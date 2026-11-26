@@ -57,6 +57,7 @@ All runs used a single Apple M1 laptop (8 GB RAM), running one model at a time w
 | Model | File | Runtime | Settings |
 | --- | --- | --- | --- |
 | Spindle | `spindle.cact` (4-bit) | This repository's engine | Window 1024, output filters, copy guard, enum debiasing on |
+| Spindle 2-bit | `spindle-2bit.cact` (2-bit E8) | This repository's engine | Same as Spindle |
 | Needle 3 | Shipped `needle3.cact` (2-bit) | Official Cactus engine | Default settings |
 | LFM3-1.7B | `LFM3-1.7B-Q4_K_M.gguf` | `llama-server` (`b11960`) | Chat template with tools, thinking off, 4 threads |
 | Qwen3.5-0.8B | `Qwen3.5-0.8B-Q4_K_M.gguf` | `llama-server` (`b11960`) | Chat template with tools, `--chat-template-kwargs '{"enable_thinking":false}'`, 4 threads, 1 slot, prompt cache off |

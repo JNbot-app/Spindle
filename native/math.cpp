@@ -454,7 +454,7 @@ void Math::project(const Tensor &t, const float *x, size_t batch, float *out, si
         cols > 32768 || !rows || rows > 65536)
         throw std::invalid_argument("Matrix-vector exceeds workspace capacity");
     bool rotate = rotated && t.kind == 3;
-    if (t.kind == 3 && t.bits == 4 && t.group == 128 && !rotate && !reference_dot) {
+    if (t.kind == 3 && t.group == 128 && !rotate && !reference_dot) {
         cq4_project(t, x, batch, out, begin, rows, rotated_input, tile, workers.get(), exact_prefill);
         return;
     }
@@ -515,7 +515,7 @@ void Math::project_prepared(const Tensor &t, const float *inputs, size_t batch, 
         cols > 32768 || !rows || rows > 65536)
         throw std::invalid_argument("Matrix-vector exceeds workspace capacity");
     bool rotate = rotated && t.kind == 3;
-    if (t.kind == 3 && t.bits == 4 && t.group == 128 && !rotate && !reference_dot) {
+    if (t.kind == 3 && t.group == 128 && !rotate && !reference_dot) {
         cq4_project_prepared(t, inputs, batch, out, begin, rows, tile, workers.get(), exact_prefill);
         return;
     }

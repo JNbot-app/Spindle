@@ -4,7 +4,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Demo](https://img.shields.io/badge/demo-in%20your%20browser-2a78d6.svg)](https://jnbot-app.github.io/Spindle/)
 
-Spindle is a 75 MB tool-calling model (about 120M parameters, 4-bit weights) that runs locally on a CPU or in a browser tab. You pass it your tool definitions as JSON Schema along with a user request, and it either picks the right tools and fills in their arguments, or returns nothing when no tool fits.
+Spindle is a 75 MB tool-calling model (about 120M parameters, 4-bit weights) that runs locally on a CPU or in a browser tab. A 47 MB 2-bit version scores almost the same (see [Model files](#model-files)). You pass it your tool definitions as JSON Schema along with a user request, and it either picks the right tools and fills in their arguments, or returns nothing when no tool fits.
 
 Because extraction and classification are just tool calls with the right schema, the same model handles those too. Grammar-constrained decoding ensures every call parses and matches your schema, and each prediction includes a probability so you can threshold uncertain results.
 
@@ -28,6 +28,20 @@ cmake -S native -B build/native -DCMAKE_BUILD_TYPE=Release
 cmake --build build/native -j
 curl -L -o models/spindle.cact --create-dirs \
   https://github.com/JNbot-app/Spindle/releases/latest/download/spindle.cact
+```
+
+### Model files
+
+| File | Size | Weights | Benchmark mean |
+| --- | ---: | --- | ---: |
+| `spindle.cact` | 75 MB | 4-bit | 51.1 |
+| `spindle-2bit.cact` | 47 MB | 2-bit (E8 lattice), embedding and output head 4-bit | 50.8 |
+
+Both files use the same API, prompt format and engine, so you can swap one path for the other. The 2-bit file is about 40% smaller to download and store, at a similar speed. It is a little weaker at extraction (DSTC8) and slightly stronger at declining (When2Call). To use it, download `spindle-2bit.cact` the same way:
+
+```sh
+curl -L -o models/spindle-2bit.cact --create-dirs \
+  https://github.com/JNbot-app/Spindle/releases/latest/download/spindle-2bit.cact
 ```
 
 ### Python
@@ -106,21 +120,21 @@ The tool prefix of the prompt is cached automatically, so repeated calls with th
 
 <p align="center"><img src="docs/images/benchmarks.svg" alt="Benchmark scores per model" width="760"></p>
 
-| Benchmark | Metric | Spindle | Needle 3 | LFM3-1.7B | Qwen3.5-0.8B | FunctionGemma-270M |
-| --- | --- | ---: | ---: | ---: | ---: | ---: |
-| Mobile Actions | exact | 86.0 | 85.5 | **87.0** | 78.5 | 39.0 |
-| DroidCall | exact | 35.5 | 41.0 | **50.0** | 19.0 | 25.0 |
-| BFCL v4 | AST | 53.0 | 40.5 | **73.0** | 53.5 | 41.5 |
-| When2Call | acc. | 67.5 | 64.5 | **68.0** | 62.5 | 64.5 |
-| Tool removed | acc. | **73.0** | 38.0 | 65.5 | 26.0 | 43.0 |
-| DSTC8 | F1 | 43.1 | 36.2 | **44.8** | 29.5 | 21.5 |
-| SNIPS | F1 | 25.0 | 16.5 | **30.5** | 15.1 | 18.9 |
-| SNIPS 7-way | F1 | 18.2 | 11.7 | **26.8** | 18.5 | 7.6 |
-| Rotten Tomatoes | acc. | **65.5** | 48.5 | 15.5 | 27.0 | 10.0 |
-| DBpedia | acc. | 44.0 | 31.0 | **79.5** | 53.0 | 2.0 |
-| **Mean** | | 51.1 | 41.3 | **54.1** | 38.3 | 27.3 |
-| Time per request (M1) | | 0.52 s | 0.38 s | 9.36 s | 5.93 s | 0.57 s |
-| File size | | 75 MB | 35 MB | 1.1 GB | 532 MB | 253 MB |
+| Benchmark | Metric | Spindle | Spindle 2-bit | Needle 3 | LFM3-1.7B | Qwen3.5-0.8B | FunctionGemma-270M |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Mobile Actions | exact | 86.0 | 84.5 | 85.5 | **87.0** | 78.5 | 39.0 |
+| DroidCall | exact | 35.5 | 37.0 | 41.0 | **50.0** | 19.0 | 25.0 |
+| BFCL v4 | AST | 53.0 | 50.5 | 40.5 | **73.0** | 53.5 | 41.5 |
+| When2Call | acc. | 67.5 | **72.5** | 64.5 | 68.0 | 62.5 | 64.5 |
+| Tool removed | acc. | **73.0** | **73.0** | 38.0 | 65.5 | 26.0 | 43.0 |
+| DSTC8 | F1 | 43.1 | 35.1 | 36.2 | **44.8** | 29.5 | 21.5 |
+| SNIPS | F1 | 25.0 | 26.1 | 16.5 | **30.5** | 15.1 | 18.9 |
+| SNIPS 7-way | F1 | 18.2 | 17.5 | 11.7 | **26.8** | 18.5 | 7.6 |
+| Rotten Tomatoes | acc. | 65.5 | **67.5** | 48.5 | 15.5 | 27.0 | 10.0 |
+| DBpedia | acc. | 44.0 | 44.5 | 31.0 | **79.5** | 53.0 | 2.0 |
+| **Mean** | | 51.1 | 50.8 | 41.3 | **54.1** | 38.3 | 27.3 |
+| Time per request (M1) | | 0.52 s | 0.46 s | 0.38 s | 9.36 s | 5.93 s | 0.57 s |
+| File size | | 75 MB | 47 MB | 35 MB | 1.1 GB | 532 MB | 253 MB |
 
 Spindle improves on Needle 3 across abstention (When2Call, Tool removed), larger tool lists (BFCL), extraction, and classification, while trailing on DroidCall where it declines more often and misses implicit details like MIME types. Compared to larger general models like LFM3-1.7B and Qwen3.5-0.8B, it gives up some accuracy on complex calls in exchange for a 75 MB footprint and ~0.5 s CPU latency.
 
@@ -167,7 +181,7 @@ The output model is saved to `runs/my-run/model.cact`. Run `spindle finetune -h`
 
 ## Model details and limitations
 
-The released model is fine-tuned from Needle 3 for 1,000 updates (32k rows, batch size 32, roughly two hours on two T4 GPUs), with its call / no-call decisions distilled from a reasoning-trained teacher. The training mix combines public tool-calling, abstention, extraction, and classification datasets (none of which overlap with the benchmark sets). If you use the training mix or rebuild it with `spindle build-data`, check each source dataset's license before commercial use.
+The released model is fine-tuned from Needle 3 for 1,000 updates (32k rows, batch size 32, roughly two hours on two T4 GPUs), with its call / no-call decisions distilled from a reasoning-trained teacher. The 2-bit model is trained the same way, but with its weights rounded to 2 bits during training. Most matrices use an E8 lattice code: each group of 8 rotated weights is stored as one 16-bit code (about 2 bits per weight) plus one scale per 128 weights, which cuts rounding error by about 10% compared with plain 2-bit levels. The embedding, the output head and a few late layers stay 4-bit. Fine-tuning `spindle-2bit.cact` keeps the 2-bit format automatically. The training mix combines public tool-calling, abstention, extraction, and classification datasets (none of which overlap with the benchmark sets). If you use the training mix or rebuild it with `spindle build-data`, check each source dataset's license before commercial use.
 
 Known limitations:
 

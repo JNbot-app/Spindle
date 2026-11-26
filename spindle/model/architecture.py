@@ -410,7 +410,7 @@ class SpindleModel(nn.Module):
         `span` = (query, start, end) arrays switch on the span attention loss (training only).
         `answer` [B, T] (1 on answer tokens) applies decode skip (config.skip_layers) as the engine does;
         without it every token runs every layer.
-        Weights are used as given: wrap them with `quantize.cq4_ste` to train for 4-bit.
+        Weights are used as given: add `quantize.cq_offsets` to train for 4-bit.
         """
         c = self.config
         x = self.embedding(tokens) * math.sqrt(c.d_model)

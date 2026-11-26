@@ -27,6 +27,44 @@ static float half(const uint8_t *p) {
                       : std::ldexp(float(m), -24);
     return x & 0x8000 ? -y : y;
 }
+// E8 lattice codes (spindle/lattice.py, record bits 8): code i -> the 8 coordinates of a lattice
+// point with norm^2 <= 10 as nibbles (level n is the value (n - 6) / 2), packed low nibble first.
+// Codes follow the sorted base-13 keys of the points' doubled coordinates.
+static const std::vector<uint32_t> &e8_table() {
+    static const std::vector<uint32_t> table = [] {
+        std::vector<std::pair<uint64_t, uint32_t>> points;
+        for (int offset : {-6, -5}) { // integer points (even doubled values), half-integer points
+            const int count = offset == -6 ? 7 : 6;
+            int digit[8] = {};
+            for (;;) {
+                int norm = 0, sum = 0;
+                uint64_t key = 0;
+                uint32_t nibbles = 0;
+                for (int j = 0; j < 8; ++j) {
+                    const int d = offset + 2 * digit[j];
+                    norm += d * d;
+                    sum += d;
+                    key = key * 13 + unsigned(d + 6);
+                    nibbles |= uint32_t(d + 6) << (4 * j);
+                }
+                if (norm <= 40 && (sum % 4 + 4) % 4 == 0)
+                    points.push_back({key, nibbles});
+                int j = 7;
+                while (j >= 0 && ++digit[j] == count)
+                    digit[j--] = 0;
+                if (j < 0)
+                    break;
+            }
+        }
+        std::sort(points.begin(), points.end());
+        std::vector<uint32_t> out;
+        out.reserve(points.size());
+        for (const auto &point : points)
+            out.push_back(point.second);
+        return out;
+    }();
+    return table;
+}
 Mapping::Mapping(const char *path) {
 #ifdef _WIN32
     int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, nullptr, 0);
@@ -96,7 +134,13 @@ void Tensor::row(size_t r, float *out, bool rotated) const {
             out[i] = scalar(r * cols + i);
         return;
     }
+    std::vector<uint8_t> widened;
     const uint8_t *codes = data + r * padded / 2;
+    if (layout != Layout::nibbles) {
+        widened.resize(padded / 2);
+        nibble_rows(r, 1, widened.data());
+        codes = widened.data();
+    }
     std::array<float, 128> group_values;
     for (size_t g = 0; g < padded / group; ++g) {
         const float scale = values[r * (padded / group) + g];
@@ -112,6 +156,22 @@ void Tensor::row(size_t r, float *out, bool rotated) const {
             fwht(group_values.data(), group);
         size_t count = rotated ? group : std::min(size_t(group), cols - std::min(cols, g * group));
         std::copy_n(group_values.data(), count, out + std::min(cols, g * group));
+    }
+}
+void Tensor::nibble_rows(size_t first, size_t count, uint8_t *out) const {
+    const size_t half = padded / 2, stride = row_bytes();
+    if (layout == Layout::nibbles) {
+        std::memcpy(out, data + first * half, count * half);
+        return;
+    }
+    for (size_t r = 0; r < count; ++r) {
+        const uint8_t *codes = data + (first + r) * stride;
+        uint8_t *row = out + r * half;
+        for (size_t m = 0; m < stride; ++m) { // crumbs: one byte holds weights 4m..4m+3
+            const unsigned b = codes[m];
+            row[2 * m] = uint8_t((b & 3) | ((b >> 2) & 3) << 4);
+            row[2 * m + 1] = uint8_t(((b >> 4) & 3) | (b >> 6) << 4);
+        }
     }
 }
 Model::Model(const char *path, uint64_t offset, uint64_t length)
@@ -163,22 +223,25 @@ Model::Model(const char *path, uint64_t offset, uint64_t length)
         t.group = read<uint32_t>(rec + 36);
         t.bits = read<uint32_t>(rec + 40);
         if (t.kind == 3) {
-            if (t.ndim != 2 || t.group != 128 || !t.bits || t.bits > 5 ||
+            const bool e8 = t.bits == 8;
+            if (t.ndim != 2 || t.group != 128 || !t.bits || (t.bits > 5 && !e8) ||
                 t.shape[1] > UINT32_MAX - 127)
                 throw std::invalid_argument("Unsupported CQ layout");
             t.padded = (t.shape[1] + 127) / 128 * 128;
-            uint64_t packed = uint64_t(t.shape[0]) * t.padded * (t.bits == 5 ? 2 : t.bits) / 8;
+            uint64_t packed = uint64_t(t.shape[0]) * t.padded * (t.bits == 5 || e8 ? 2 : t.bits) / 8;
             uint64_t norms = uint64_t(t.shape[0]) * (t.padded / 128);
             if (packed > bytes || norms > (bytes - packed) / 2 || packed + norms * 2 != bytes)
                 throw std::invalid_argument("CQ payload size differs from shape");
-            t.packed_bytes = size_t(packed);
             t.values.resize(size_t(norms));
             for (size_t k = 0; k < norms; ++k) {
                 t.values[k] = half(t.data + packed + k * 2);
-                if (!std::isfinite(t.values[k]) || t.values[k] < 0)
+                if (!std::isfinite(t.values[k]) || (t.values[k] < 0 && !e8)) // an E8 gain is fitted
                     throw std::invalid_argument("Invalid CQ norm");
             }
-            if (t.bits >= 2 && t.bits <= 4)
+            if (e8)
+                for (int n = 0; n < 16; ++n)
+                    t.book[n] = n < 13 ? (n - 6) * 0.5f : 0.f;
+            else if (t.bits >= 2 && t.bits <= 4)
                 std::copy_n(books.data() + (1u << t.bits) - 4, 1u << t.bits, t.book.data());
             else if (t.bits == 1) {
                 t.book[1] = std::sqrt(2.f / 3.14159265358979323846f / 128.f);
@@ -188,28 +251,42 @@ Model::Model(const char *path, uint64_t offset, uint64_t length)
                 t.book[1] = float(1.2240064 / std::sqrt(128.));
                 t.book[3] = -t.book[1];
             }
-            if (t.bits != 4) {
-                // Narrower codes are widened to nibbles once, so every CQ tensor uses the same
-                // kernels. The codebook is per tensor, so the values do not change.
-                const size_t width = t.bits == 5 ? 2 : t.bits, row_bytes = t.padded / 2;
-                t.nibbles.assign(size_t(t.shape[0]) * row_bytes, 0);
+            if (e8) {
+                // Each 16-bit code becomes 8 nibbles once: E8 has no fast 2-bit kernel (one lookup
+                // per 8 weights in a 455 KB table is ~2x slower), so it runs on the 4-bit kernels.
+                const auto &table = e8_table();
+                t.repacked.resize(size_t(t.shape[0]) * t.padded / 2);
+                for (size_t b = 0; b < t.shape[0] * t.padded / 8; ++b) {
+                    const uint16_t code = read<uint16_t>(t.data + b * 2);
+                    if (code >= table.size())
+                        throw std::invalid_argument("Invalid E8 code");
+                    std::memcpy(t.repacked.data() + b * 4, &table[code], 4);
+                }
+                t.data = t.repacked.data();
+            } else if (t.bits == 2 || t.bits == 5) {
+                // 2-bit and ternary codes stay in the archive; their kernels read that order.
+                for (size_t k = 0; k < t.shape[0] * t.padded / 4; ++k)
+                    for (int shift = 0; t.bits == 5 && shift < 8; shift += 2)
+                        if (((t.data[k] >> shift) & 3) == 2)
+                            throw std::invalid_argument("Invalid ternary code");
+                t.layout = Layout::crumbs;
+            } else if (t.bits != 4) {
+                // 1-bit and 3-bit codes are widened to nibbles once. The codebook is per tensor,
+                // so the values do not change.
+                const size_t width = t.bits, row_bytes = t.padded / 2;
+                t.repacked.assign(size_t(t.shape[0]) * row_bytes, 0);
                 for (size_t r = 0; r < t.shape[0]; ++r) {
                     const uint8_t *codes = t.data + r * t.padded * width / 8;
-                    uint8_t *row = t.nibbles.data() + r * row_bytes;
+                    uint8_t *row = t.repacked.data() + r * row_bytes;
                     for (size_t i = 0; i < t.padded; ++i) {
                         const size_t bit = i * width;
                         unsigned index = codes[bit / 8] >> (bit % 8);
                         if (bit % 8 + width > 8)
                             index |= unsigned(codes[bit / 8 + 1]) << (8 - bit % 8);
-                        index &= (1u << width) - 1;
-                        if (t.bits == 5 && index == 2)
-                            throw std::invalid_argument("Invalid ternary code");
-                        row[i / 2] |= uint8_t(index << (i % 2 * 4));
+                        row[i / 2] |= uint8_t((index & ((1u << width) - 1)) << (i % 2 * 4));
                     }
                 }
-                t.data = t.nibbles.data();
-                t.bits = 4;
-                t.packed_bytes = t.nibbles.size();
+                t.data = t.repacked.data();
             }
         } else if (t.kind <= 2) {
             size_t width = t.kind == 1 ? 2 : 4;

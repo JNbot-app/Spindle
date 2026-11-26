@@ -8,6 +8,9 @@ struct IntegerInput {
     const float *scales;
     const int8_t *book;
 };
+// The int8 codebook of the integer path; returns its scale.
+float int8_book(const float *book, int8_t *out);
+
 struct CpuKernels {
     const char *name;
     void (*project)(const Tensor &, const float *, const float *, size_t, size_t, size_t, float *, size_t);
